@@ -159,6 +159,8 @@ struct RemoteControlView: View {
             .allowsHitTesting(isConnected)
         }
         .onReceive(NotificationCenter.default.publisher(for: .startDictation)) { _ in
+            // Command mode has its own text field.
+            guard !TouchMode.shared.commandModeActive else { return }
             selectedTab = .remote
             showingKeyboard = true
             // Give the field a moment to appear and take focus.
@@ -167,6 +169,7 @@ struct RemoteControlView: View {
             }
         }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in
+            guard !TouchMode.shared.commandModeActive else { return }
             showingKeyboard.toggle()
             if !showingKeyboard {
                 keyboardText = ""
@@ -1171,7 +1174,7 @@ struct DictateButton: View {
             .font(.system(size: size * 0.33, weight: .medium))
             .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
             .frame(width: size, height: size)
-            .background(Circle().fill(Color(nsColor: DS.Colors.remoteButton)))
+            .background(ControlBackground(shape: Circle()))
             .overlay(Circle().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
             .overlay(RemoteButtonGesture { action in
                 guard action == .click else { return }
@@ -1185,7 +1188,7 @@ struct DictateButton: View {
 }
 
 /// Focus the remote's text field (if it isn't already) and ask AppKit to start dictation.
-private func beginDictation(in window: NSWindow?) {
+func beginDictation(in window: NSWindow?) {
     guard let window else { return }
     func firstEditableField(in view: NSView) -> NSTextField? {
         if let field = view as? NSTextField, field.isEditable { return field }
@@ -1220,8 +1223,7 @@ struct DPadView: View {
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(Color(nsColor: DS.Colors.remoteButton))
+            ControlBackground(shape: Circle())
                 .frame(width: size, height: size)
 
             // Center select button — larger, subtly distinct from outer ring
@@ -1332,7 +1334,7 @@ struct RemoteCircleButton: View {
             .scaledToFit()
             .frame(width: size * 0.33, height: size * 0.33)
             .frame(width: size, height: size)
-            .background(Circle().fill(Color(nsColor: DS.Colors.remoteButton)))
+            .background(ControlBackground(shape: Circle()))
             .overlay(Circle().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
             .overlay(Circle().fill(.white.opacity(isHeld ? 0.22 : 0)).allowsHitTesting(false))
             .scaleEffect(isHeld ? 0.94 : 1)
@@ -1390,7 +1392,7 @@ struct VolumePill: View {
             if !horizontal { minusButton }
         }
         .frame(width: width, height: height)
-        .background(Capsule().fill(Color(nsColor: DS.Colors.remoteButton)))
+        .background(ControlBackground(shape: Capsule()))
         .overlay(Capsule().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
         .clipShape(Capsule())
         .shortcutHint(.volumeUp, alignment: .top, offset: CGSize(width: 0, height: 7))

@@ -17,6 +17,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private var observation: AnyCancellable?
     private var panel: NSPanel?
     private var panelHostingView: NSView?
+    private lazy var commandMode = CommandModeController(manager: manager, iconLoader: iconLoader)
+    private var commandModeObserver: NSObjectProtocol?
     /// Touch layout: the panel is snapped to the right screen edge.
     private var isDocked = false
     private var isRedocking = false
@@ -34,6 +36,13 @@ final class AppController: NSObject, NSMenuDelegate {
         setupStatusItem()
         // Watch the menu bar icon too, so opening the remote with a finger counts as touch.
         if let button = statusItem.button { TouchMode.shared.attachSniffer(to: button) }
+        commandMode.onExit = { [weak self] in self?.exitCommandMode() }
+        commandModeObserver = NotificationCenter.default.addObserver(
+            forName: .toggleCommandMode, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if self.commandMode.isActive { self.exitCommandMode() } else { self.enterCommandMode() }
+        }
         rebuildMenu()
         startObserving()
         setupHotkeyHandler()
@@ -653,6 +662,29 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
+    // MARK: - Command mode
+
+    /// Full-screen black control panel; the small remote hides while it's up.
+    private func enterCommandMode() {
+        guard panel != nil, !commandMode.isActive else { return }
+        releaseHeldKey(reason: "command mode")
+        let screen = panel?.screen
+        panel?.orderOut(nil)
+        TouchMode.shared.commandModeActive = true
+        commandMode.show(preferredScreen: screen)
+    }
+
+    private func exitCommandMode() {
+        guard commandMode.isActive else { return }
+        releaseHeldKey(reason: "command mode")
+        commandMode.close()
+        TouchMode.shared.commandModeActive = false
+        if let panel {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
     // MARK: - Touch layout
 
     /// The panel's frame when snapped to the right edge of its screen.
@@ -707,6 +739,10 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func dismissPanel() {
+        if commandMode.isActive {
+            commandMode.close()
+            TouchMode.shared.commandModeActive = false
+        }
         TouchMode.shared.onChange = nil
         isDocked = false
         undockedTopLeft = nil
@@ -773,7 +809,8 @@ final class AppController: NSObject, NSMenuDelegate {
         removeKeyboardMonitor()
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             // Only keys typed into the remote itself – not into the shortcuts window or Settings.
-            guard let self, let panel = self.panel, panel.isVisible, event.window === panel else { return event }
+            guard let self, let window = event.window, window.isVisible,
+                  window === self.panel || window === self.commandMode.window else { return event }
             let handled = event.type == .keyUp ? self.handleRemoteKeyUp(event) : self.handleRemoteKeyDown(event)
             return handled ? nil : event
         }
@@ -836,7 +873,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
         switch shortcut {
         case .close:
-            manager.disconnect()
+            if commandMode.isActive { exitCommandMode() } else { manager.disconnect() }
         case .keyboard:
             manager.keyboardToggleCounter &+= 1
             manager.triggerKeyboardBlink(.siri)
@@ -866,7 +903,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
     /// Field editor, NSTextField or SwiftUI text in the panel has focus.
     private var isTextInputFocused: Bool {
-        var responder: NSResponder? = panel?.firstResponder
+        var responder: NSResponder? = (commandMode.window ?? panel)?.firstResponder
         while let current = responder {
             if current is NSText || current is NSTextField { return true }
             responder = current.nextResponder
@@ -938,6 +975,10 @@ struct PanelMenuButton: View {
 
     var body: some View {
         Menu {
+            Button("Command mode") {
+                NotificationCenter.default.post(name: .toggleCommandMode, object: nil)
+            }
+            Divider()
             Toggle("Always on top", isOn: $alwaysOnTop)
             Toggle("Show app search", isOn: $showAppsSearch)
                 .keyboardShortcut("f", modifiers: .command)

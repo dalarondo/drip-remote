@@ -40,8 +40,14 @@ final class TouchMode: NSObject, NSGestureRecognizerDelegate {
     @ObservationIgnored private var defaultsObserver: NSObjectProtocol?
     @ObservationIgnored private var lastReported = false
 
+    /// Command mode (full-screen control panel) always uses the large sizes.
+    var commandModeActive = false {
+        didSet { notifyIfChanged() }
+    }
+
     var isTouch: Bool {
-        switch preference {
+        if commandModeActive { return true }
+        return switch preference {
         case .auto: touchDetected
         case .always: true
         case .never: false
