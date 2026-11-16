@@ -74,6 +74,9 @@ final class CommandModeController {
     private var keyLightTimer: Timer?
     private var keyRecentlyPressed = false
 
+    private let cursorHideDelay: TimeInterval = 3
+    private var cursorTimer: Timer?
+
     /// Called when the user leaves command mode from inside it.
     var onExit: (() -> Void)?
 
@@ -119,6 +122,8 @@ final class CommandModeController {
         let hosting = NSHostingView(rootView: root)
         hosting.safeAreaRegions = []
         window.contentView = hosting
+        // Lets us tell a finger from the pointer, to keep the cursor hidden for touch.
+        TouchMode.shared.attachSniffer(to: hosting)
         window.setFrame(screen.frame, display: true)
 
         NSApp.activate(ignoringOtherApps: true)
@@ -132,10 +137,11 @@ final class CommandModeController {
 
         state.dimmed = false
         activityMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .leftMouseDragged, .mouseMoved, .keyDown, .scrollWheel]
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .mouseMoved, .keyDown, .scrollWheel]
         ) { [weak self] event in
             if event.window === self?.window {
                 self?.noteActivity()
+                self?.updateCursor(for: event)
                 if event.type == .keyDown { self?.noteKeyPress() }
             }
             return event
@@ -146,6 +152,24 @@ final class CommandModeController {
         state.onTextEntryChange = { [weak self] in self?.updateKeyboardBacklight() }
         keyRecentlyPressed = false
         updateKeyboardBacklight()
+
+        NSCursor.setHiddenUntilMouseMoves(true)
+    }
+
+    /// The cursor is hidden in command mode. Moving a real mouse / trackpad shows it,
+    /// and it hides again after a few seconds still. Touches never show it.
+    private func updateCursor(for event: NSEvent) {
+        switch event.type {
+        case .mouseMoved:
+            cursorTimer?.invalidate()
+            cursorTimer = Timer.scheduledTimer(withTimeInterval: cursorHideDelay, repeats: false) { _ in
+                NSCursor.setHiddenUntilMouseMoves(true)
+            }
+        case .leftMouseDown, .leftMouseDragged, .leftMouseUp:
+            if TouchMode.shared.touchDetected { NSCursor.setHiddenUntilMouseMoves(true) }
+        default:
+            break
+        }
     }
 
     private func noteKeyPress() {
@@ -171,6 +195,9 @@ final class CommandModeController {
     }
 
     func close() {
+        cursorTimer?.invalidate()
+        cursorTimer = nil
+        NSCursor.setHiddenUntilMouseMoves(false)
         keyLightTimer?.invalidate()
         keyLightTimer = nil
         state.onTextEntryChange = nil
