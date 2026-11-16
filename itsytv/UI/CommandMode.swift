@@ -153,6 +153,7 @@ struct CommandModeView: View {
     @State private var showingKeyboard = false
     @State private var keyboardText = ""
     @AppStorage("commandModeShowClock") private var showClock = true
+    @AppStorage("commandModeRed") private var redOnBlack = false
 
     private var isConnected: Bool { manager.connectionStatus == .connected }
 
@@ -258,6 +259,8 @@ struct CommandModeView: View {
                 .padding(.top, max(topInset, unit * 0.3))
                 .padding(.bottom, unit * 0.2)
             }
+            // Night colours: multiplying turns every white / grey pixel red and leaves black black.
+            .colorMultiply(redOnBlack ? Color(red: 1, green: 0.12, blue: 0.08) : .white)
             .opacity(state.dimmed ? 0.3 : 1)
             .animation(.easeInOut(duration: state.dimmed ? 2 : 0.2), value: state.dimmed)
         }
