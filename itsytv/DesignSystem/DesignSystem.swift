@@ -153,6 +153,7 @@ extension NSColor {
 struct CapsuleSegmentPicker<T: Hashable>: View {
     @Binding var selection: T
     let options: [(T, String)]
+    var large = false
 
     var body: some View {
         HStack(spacing: 2) {
@@ -165,10 +166,10 @@ struct CapsuleSegmentPicker<T: Hashable>: View {
                     }
                 } label: {
                     Text(label)
-                        .font(.caption)
+                        .font(large ? .body : .caption)
                         .fontWeight(.medium)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 5)
+                        .padding(.vertical, large ? 10 : 5)
                         .background(
                             Capsule()
                                 .fill(selection == value ? Color(nsColor: DS.Colors.primary) : .clear)

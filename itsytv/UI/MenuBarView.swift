@@ -26,8 +26,10 @@ struct RemoteControlView: View {
         manager.connectionStatus == .connected
     }
 
+    private var touch: Bool { TouchMode.shared.isTouch }
+
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: touch ? 14 : 10) {
             // Header — always interactive
             HStack(spacing: 8) {
                 Text(manager.connectedDeviceName ?? "Apple TV")
@@ -66,11 +68,12 @@ struct RemoteControlView: View {
             }
 
             // Controls — dimmed while connecting
-            VStack(spacing: 10) {
+            VStack(spacing: touch ? 14 : 10) {
                 // Tab picker
                 CapsuleSegmentPicker(
                     selection: $selectedTab,
-                    options: RemoteTab.allCases.map { ($0, $0.rawValue) }
+                    options: RemoteTab.allCases.map { ($0, $0.rawValue) },
+                    large: touch
                 )
                 .padding(.horizontal, 8)
 
@@ -82,7 +85,7 @@ struct RemoteControlView: View {
                             .foregroundStyle(.secondary)
                         ComposeAwareTextField(
                             text: $keyboardText,
-                            placeholder: "Type to search...",
+                            placeholder: "Type or dictate...",
                             onCommittedTextChange: { committed in
                                 manager.updateRemoteText(committed)
                             },
@@ -104,7 +107,7 @@ struct RemoteControlView: View {
                 ZStack(alignment: .top) {
                     ZStack {
                         // Remote always rendered (hidden when on apps to keep size)
-                        VStack(spacing: 10) {
+                        VStack(spacing: touch ? 14 : 10) {
                             RemoteTabContent(swipeEnabled: selectedTab == .remote)
                             NowPlayingBar()
                         }
@@ -131,9 +134,9 @@ struct RemoteControlView: View {
                                 }
                             } label: {
                                 Image(systemName: "keyboard")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(.system(size: touch ? 18 : 14, weight: .medium))
                                     .foregroundStyle(.secondary)
-                                    .frame(width: 24, height: 24)
+                                    .frame(width: touch ? 44 : 32, height: touch ? 44 : 32)
                                     .background(Circle().fill(Color.secondary.opacity(0.12)))
                             }
                             .buttonStyle(.plain)
@@ -154,6 +157,14 @@ struct RemoteControlView: View {
             }
             .opacity(isConnected ? 1 : 0.4)
             .allowsHitTesting(isConnected)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .startDictation)) { _ in
+            selectedTab = .remote
+            showingKeyboard = true
+            // Give the field a moment to appear and take focus.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                beginDictation(in: NSApp.keyWindow)
+            }
         }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in
             showingKeyboard.toggle()
@@ -215,6 +226,7 @@ struct RemoteControlView: View {
 struct NowPlayingBar: View {
     @Environment(AppleTVManager.self) private var manager
     @AppStorage("showArtwork") private var showArtwork = true
+    private var touch: Bool { TouchMode.shared.isTouch }
 
     var body: some View {
         let mrp = manager.mrpManager
@@ -223,7 +235,8 @@ struct NowPlayingBar: View {
 
         VStack(spacing: 6) {
             // Artwork – full width, square (can be turned off in the … menu)
-            if !showArtwork {
+            // Touch layout drops the artwork: the taller controls need the room.
+            if !showArtwork || touch {
                 EmptyView()
             } else if let data = np?.artworkData, let image = NSImage(data: data) {
                 Color.clear
@@ -262,12 +275,14 @@ struct NowPlayingBar: View {
 
             // Controls — use HID button presses (not MRP commands) for play/pause
             // because apps like YouTube ignore MRP SendCommandMessage.
-            HStack(spacing: 28) {
+            HStack(spacing: touch ? 20 : 12) {
                 Button {
                     mrp.sendCommand(.previousTrack)
                 } label: {
                     Image(systemName: "backward.fill")
-                        .font(.system(size: 18))
+                        .font(.system(size: touch ? 24 : 18))
+                        .frame(width: touch ? 64 : 44, height: touch ? 52 : 36)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!hasContent || !mrp.supportedCommands.contains(.previousTrack))
@@ -276,7 +291,9 @@ struct NowPlayingBar: View {
                     manager.pressButton(.playPause)
                 } label: {
                     Image(systemName: np?.isPlaying == true ? "pause.fill" : "play.fill")
-                        .font(.system(size: 22))
+                        .font(.system(size: touch ? 30 : 22))
+                        .frame(width: touch ? 64 : 44, height: touch ? 52 : 36)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!hasContent)
@@ -285,7 +302,9 @@ struct NowPlayingBar: View {
                     mrp.sendCommand(.nextTrack)
                 } label: {
                     Image(systemName: "forward.fill")
-                        .font(.system(size: 18))
+                        .font(.system(size: touch ? 24 : 18))
+                        .frame(width: touch ? 64 : 44, height: touch ? 52 : 36)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!hasContent || !mrp.supportedCommands.contains(.nextTrack))
@@ -300,118 +319,226 @@ struct NowPlayingBar: View {
             )
             .opacity(hasContent && (np?.duration ?? 0) > 0 ? 1 : 0.3)
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 16)
+        .padding(.horizontal, touch ? 24 : 16)
+        .padding(.bottom, touch ? 24 : 16)
     }
 }
 
+/// Touch-friendly, Apple Music–style scrubber.
+///
+/// - Tall (40pt) hit area; the track grows and a thumb appears while scrubbing.
+/// - Progress advances smoothly (per frame) instead of once a second.
+/// - Dragging away from the bar vertically slows the scrub (Hi-Speed → Half →
+///   Quarter → Fine), like the iOS scrubber, for precise seeking on a long video.
+/// - The seek is sent once, on release; nothing is sent while dragging.
+/// - A tap jumps straight to that position.
 struct NowPlayingProgress: View {
     let nowPlaying: NowPlayingState?
     let duration: TimeInterval
     var onSeek: ((Double) -> Void)?
 
     @AppStorage("showRemainingTime") private var showRemainingTime = false
-    @State private var currentTime: TimeInterval = 0
     @State private var isSeeking = false
-    @State private var seekTime: TimeInterval = 0
+    /// Position being scrubbed to, in seconds.
+    @State private var scrubTime: TimeInterval = 0
+    @State private var lastDragX: CGFloat?
+    @State private var scrubSpeed: ScrubSpeed = .highSpeed
     /// After seeking, hold the seeked position until the server catches up.
     @State private var pendingSeekTarget: TimeInterval?
-    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @State private var pendingSeekSince = Date.distantPast
 
-    private var displayTime: TimeInterval {
-        if isSeeking { return seekTime }
-        if let target = pendingSeekTarget { return target }
-        return currentTime
+    private var touch: Bool { TouchMode.shared.isTouch }
+    private var trackHeight: CGFloat { touch ? 8 : 4 }
+    private var activeTrackHeight: CGFloat { touch ? 18 : 12 }
+    private var thumbSize: CGFloat { touch ? 30 : 18 }
+    private var hitHeight: CGFloat { touch ? 64 : 40 }
+
+    enum ScrubSpeed: Equatable {
+        case highSpeed, half, quarter, fine
+
+        init(verticalDistance d: CGFloat) {
+            switch d {
+            case ..<40: self = .highSpeed
+            case ..<90: self = .half
+            case ..<150: self = .quarter
+            default: self = .fine
+            }
+        }
+
+        var factor: CGFloat {
+            switch self {
+            case .highSpeed: 1
+            case .half: 0.5
+            case .quarter: 0.25
+            case .fine: 0.1
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .highSpeed: "Hi-Speed scrubbing"
+            case .half: "Half-speed scrubbing"
+            case .quarter: "Quarter-speed scrubbing"
+            case .fine: "Fine scrubbing"
+            }
+        }
     }
 
-    private var progress: Double {
-        guard duration > 0 else { return 0 }
-        return min(1, displayTime / duration)
+    /// Where the bar should currently sit, given the latest server state.
+    private func displayTime(at date: Date) -> TimeInterval {
+        if isSeeking { return scrubTime }
+        if let target = pendingSeekTarget { return target }
+        return min(duration, max(0, nowPlaying?.currentPosition ?? 0))
     }
 
     var body: some View {
-        VStack(spacing: 2) {
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(.quaternary)
-                        .frame(height: 3)
+        let isPlaying = (nowPlaying?.playbackRate ?? 0) > 0
+        // Redraw every frame while playing or scrubbing; idle otherwise.
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !(isPlaying || isSeeking || pendingSeekTarget != nil))) { context in
+            let time = displayTime(at: context.date)
+            let progress = duration > 0 ? min(1, max(0, time / duration)) : 0
 
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(.secondary)
-                        .frame(width: max(0, geo.size.width * progress), height: 3)
-                }
-                .frame(height: 12)
-                .contentShape(Rectangle())
-                .background(WindowDragBlocker())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            guard duration > 0 else { return }
-                            isSeeking = true
-                            let fraction = max(0, min(1, value.location.x / geo.size.width))
-                            seekTime = fraction * duration
-                        }
-                        .onEnded { value in
-                            guard duration > 0 else { return }
-                            let fraction = max(0, min(1, value.location.x / geo.size.width))
-                            let position = fraction * duration
-                            onSeek?(position)
-                            currentTime = position
-                            pendingSeekTarget = position
-                            isSeeking = false
-                        }
-                )
-            }
-            .frame(height: 12)
+            VStack(spacing: 0) {
+                GeometryReader { geo in
+                    let height = isSeeking ? activeTrackHeight : trackHeight
+                    let fillWidth = geo.size.width * progress
 
-            HStack {
-                Text(formatTime(displayTime))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text(showRemainingTime ? "-\(formatTime(duration - displayTime))" : formatTime(duration))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .onTapGesture { showRemainingTime.toggle() }
-            }
-        }
-        .onAppear { currentTime = nowPlaying?.currentPosition ?? 0 }
-        .onReceive(timer) { _ in
-            if !isSeeking {
-                let serverTime = nowPlaying?.currentPosition ?? 0
-                if let target = pendingSeekTarget {
-                    // Clear hold once the server reports a position near the seek target
-                    if abs(serverTime - target) < 3 {
-                        pendingSeekTarget = nil
-                        currentTime = serverTime
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(.quaternary)
+                            .frame(height: height)
+
+                        Capsule()
+                            .fill(isSeeking ? Color.primary : Color.secondary)
+                            .frame(width: max(height, fillWidth), height: height)
+
+                        Circle()
+                            .fill(Color.primary)
+                            .frame(width: thumbSize, height: thumbSize)
+                            .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                            .offset(x: min(max(0, fillWidth - thumbSize / 2), geo.size.width - thumbSize))
+                            .opacity(isSeeking ? 1 : 0)
+                            .scaleEffect(isSeeking ? 1 : 0.4)
                     }
-                } else {
-                    currentTime = serverTime
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .contentShape(Rectangle())
+                    .background(WindowDragBlocker())
+                    .gesture(scrubGesture(width: geo.size.width))
+                    .animation(.spring(response: 0.25, dampingFraction: 0.75), value: isSeeking)
+                }
+                .frame(height: hitHeight)
+
+                ZStack {
+                    HStack {
+                        Text(formatTime(time))
+                        Spacer()
+                        Text(showRemainingTime ? "-\(formatTime(duration - time))" : formatTime(duration))
+                            .onTapGesture { showRemainingTime.toggle() }
+                    }
+                    .font(.system(size: (isSeeking ? 12 : 10) * (touch ? 1.3 : 1), weight: isSeeking ? .semibold : .regular, design: .monospaced))
+                    .foregroundStyle(isSeeking ? .secondary : .tertiary)
+
+                    if isSeeking {
+                        Text(scrubSpeed.label)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.tertiary)
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeOut(duration: 0.15), value: isSeeking)
+                .animation(.easeOut(duration: 0.15), value: scrubSpeed)
+            }
+            // Clear the "hold until server catches up" state once it has.
+            .onChange(of: nowPlaying?.currentPosition ?? 0) { _, serverTime in
+                guard let target = pendingSeekTarget, !isSeeking else { return }
+                let expected = target + (isPlaying ? Date().timeIntervalSince(pendingSeekSince) : 0)
+                if abs(serverTime - expected) < 3 || Date().timeIntervalSince(pendingSeekSince) > 6 {
+                    pendingSeekTarget = nil
                 }
             }
         }
+    }
+
+    private func scrubGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { value in
+                guard duration > 0, width > 0 else { return }
+                if !isSeeking {
+                    // Touch-down: jump to the touched point, then scrub relatively from there.
+                    isSeeking = true
+                    scrubSpeed = .highSpeed
+                    scrubTime = clampTime(value.location.x / width * duration)
+                    lastDragX = value.location.x
+                    haptic(.alignment)
+                    return
+                }
+                // Distance from the bar picks the scrub speed (the bar is 40pt tall).
+                let verticalDistance = max(0, abs(value.location.y - hitHeight / 2) - hitHeight / 2)
+                let speed = ScrubSpeed(verticalDistance: verticalDistance)
+                if speed != scrubSpeed {
+                    scrubSpeed = speed
+                    haptic(.levelChange)
+                }
+                let dx = value.location.x - (lastDragX ?? value.location.x)
+                lastDragX = value.location.x
+                let before = scrubTime
+                scrubTime = clampTime(scrubTime + dx / width * duration * scrubSpeed.factor)
+                if (before > 0 && scrubTime == 0) || (before < duration && scrubTime == duration) {
+                    haptic(.alignment)
+                }
+            }
+            .onEnded { _ in
+                guard isSeeking else { return }
+                let position = scrubTime
+                lastDragX = nil
+                if duration > 0 {
+                    onSeek?(position)
+                    pendingSeekTarget = position
+                    pendingSeekSince = Date()
+                }
+                isSeeking = false
+                haptic(.generic)
+            }
+    }
+
+    private func clampTime(_ t: TimeInterval) -> TimeInterval {
+        min(duration, max(0, t))
+    }
+
+    private func haptic(_ pattern: NSHapticFeedbackManager.FeedbackPattern) {
+        NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
     }
 
     private func formatTime(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds))
-        let m = total / 60
+        let h = total / 3600
+        let m = (total % 3600) / 60
         let s = total % 60
-        return String(format: "%d:%02d", m, s)
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 }
 
 struct RemoteTabContent: View {
     @Environment(AppleTVManager.self) private var manager
     let swipeEnabled: Bool
-    private let padding: CGFloat = 8
-    private let buttonSize: CGFloat = 60
-    private let buttonGap: CGFloat = 12
+
+    private var touch: Bool { TouchMode.shared.isTouch }
+    private var padding: CGFloat { touch ? 16 : 8 }
+    private var buttonSize: CGFloat { touch ? 78 : 60 }
+    private var buttonGap: CGFloat { touch ? 18 : 12 }
+
+    private func back(_ action: InputAction) {
+        if action == .hold {
+            manager.pressButton(.home)
+        } else {
+            manager.pressButton(.menu, action: action)
+        }
+    }
 
     var body: some View {
-        let dpadSize: CGFloat = 150
+        let dpadSize: CGFloat = touch ? 232 : 150
 
-        VStack(spacing: 4) {
+        VStack(spacing: touch ? 20 : 4) {
             // D-pad
             DPadView(
                 onPress: { button, action in manager.pressButton(button, action: action) },
@@ -421,54 +548,76 @@ struct RemoteTabContent: View {
                 .padding(.top, 15)
 
             // Buttons matching Apple TV remote layout
-            VStack(spacing: buttonGap) {
-                // Row 1: Back + TV/Home
-                HStack(spacing: buttonGap) {
-                    RemoteCircleButton(imageName: "btnBack", button: .menu, shortcut: .back, size: buttonSize) { action in
-                        if action == .hold {
-                            manager.pressButton(.home)
-                        } else {
-                            manager.pressButton(.menu, action: action)
-                        }
-                    }
-                    RemoteCircleButton(imageName: "btnHome", button: .home, shortcut: .home, size: buttonSize) { action in
-                        manager.pressButton(.home, action: action)
-                    }
+            if touch {
+                touchButtons
+            } else {
+                compactButtons
+            }
+        }
+        .padding(.horizontal, padding)
+        .padding(.bottom, touch ? 16 : 12)
+    }
+
+    /// Wide layout: Back / TV / Dictate, then Play-Pause / Mute, then a full-width volume bar.
+    private var touchButtons: some View {
+        VStack(spacing: buttonGap) {
+            HStack(spacing: buttonGap) {
+                RemoteCircleButton(imageName: "btnBack", button: .menu, shortcut: .back, size: buttonSize, onInput: back)
+                RemoteCircleButton(imageName: "btnHome", button: .home, shortcut: .home, size: buttonSize) { action in
+                    manager.pressButton(.home, action: action)
                 }
+                DictateButton(size: buttonSize)
+            }
+            HStack(spacing: buttonGap) {
+                RemoteCircleButton(imageName: "btnPlayPause", button: .playPause, shortcut: .playPause, size: buttonSize) { action in
+                    manager.pressButton(.playPause, action: action)
+                }
+                RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: buttonSize) { action in
+                    guard action == .click else { return }
+                    manager.toggleMute()
+                }
+            }
+            VolumePill(
+                width: buttonSize * 3 + buttonGap * 2,
+                height: buttonSize * 0.85,
+                horizontal: true,
+                onUp: { manager.pressButton(.volumeUp) },
+                onDown: { manager.pressButton(.volumeDown) }
+            )
+        }
+    }
 
-                // Rows 2-3: Play/Pause + Mute left, Volume pill right
-                HStack(alignment: .top, spacing: buttonGap) {
-                    VStack(spacing: buttonGap) {
-                        RemoteCircleButton(imageName: "btnPlayPause", button: .playPause, shortcut: .playPause, size: buttonSize) { action in
-                            manager.pressButton(.playPause, action: action)
-                        }
-                        RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: buttonSize) { action in
-                            guard action == .click else { return }
-                            manager.toggleMute()
-                        }
-                        // TODO: Keyboard button – decide on placement
-                        // RemoteCircleButton(imageName: "btnKeyboard", button: .siri, shortcut: "⌘K", size: buttonSize) { action in
-                        //     guard action == .click else { return }
-                        //     showingKeyboard.toggle()
-                        //     if !showingKeyboard {
-                        //         keyboardText = ""
-                        //         manager.resetTextInputState()
-                        //     }
-                        // }
-                    }
-
-                    VolumePill(
-                        width: buttonSize,
-                        height: buttonSize * 2 + buttonGap,
-                        onUp: { manager.pressButton(.volumeUp) },
-                        onDown: { manager.pressButton(.volumeDown) }
-                    )
+    private var compactButtons: some View {
+        VStack(spacing: buttonGap) {
+            // Row 1: Back + TV/Home
+            HStack(spacing: buttonGap) {
+                RemoteCircleButton(imageName: "btnBack", button: .menu, shortcut: .back, size: buttonSize, onInput: back)
+                RemoteCircleButton(imageName: "btnHome", button: .home, shortcut: .home, size: buttonSize) { action in
+                    manager.pressButton(.home, action: action)
                 }
             }
 
+            // Rows 2-4: Dictate + Play/Pause + Mute left, Volume pill right
+            HStack(alignment: .top, spacing: buttonGap) {
+                VStack(spacing: buttonGap) {
+                    DictateButton(size: buttonSize)
+                    RemoteCircleButton(imageName: "btnPlayPause", button: .playPause, shortcut: .playPause, size: buttonSize) { action in
+                        manager.pressButton(.playPause, action: action)
+                    }
+                    RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: buttonSize) { action in
+                        guard action == .click else { return }
+                        manager.toggleMute()
+                    }
+                }
+
+                VolumePill(
+                    width: buttonSize,
+                    height: buttonSize * 3 + buttonGap * 2,
+                    onUp: { manager.pressButton(.volumeUp) },
+                    onDown: { manager.pressButton(.volumeDown) }
+                )
+            }
         }
-        .padding(.horizontal, padding)
-        .padding(.bottom, 12)
     }
 }
 
@@ -481,10 +630,9 @@ struct AppGridView: View {
     @State private var apps: [(bundleID: String, name: String)] = []
     @State private var draggingBundleID: String?
 
-    private let columns = [
-        GridItem(.flexible(), spacing: 8),
-        GridItem(.flexible(), spacing: 8),
-    ]
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 12), count: TouchMode.shared.isTouch ? 3 : 2)
+    }
 
     private var filteredApps: [(bundleID: String, name: String)] {
         guard !searchText.isEmpty else { return apps }
@@ -547,7 +695,7 @@ struct AppGridView: View {
                 }
 
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 8) {
+                LazyVGrid(columns: columns, spacing: TouchMode.shared.isTouch ? 16 : 8) {
                     ForEach(filteredApps, id: \.bundleID) { app in
                         appView(for: app)
                             .opacity(draggingBundleID == app.bundleID ? 0.5 : 1)
@@ -633,7 +781,7 @@ struct AppButton: View {
     let icon: NSImage?
     let action: () -> Void
 
-    private let iconHeight: CGFloat = 42
+    private var iconHeight: CGFloat { TouchMode.shared.isTouch ? 64 : 42 }
     private let cornerRadius: CGFloat = 10
 
     var body: some View {
@@ -675,7 +823,7 @@ struct AppleAppButton: View {
     let symbolName: String?
     let action: () -> Void
 
-    private let iconHeight: CGFloat = 42
+    private var iconHeight: CGFloat { TouchMode.shared.isTouch ? 64 : 42 }
     private let cornerRadius: CGFloat = 10
 
     var body: some View {
@@ -886,6 +1034,171 @@ private final class DPadSwipeCaptureView: NSView {
     }
 }
 
+// MARK: - Touch surface for the D-pad
+
+/// One gesture surface over the whole D-pad, so a finger doesn't have to hit a
+/// 5pt dot: a tap anywhere clicks the nearest direction (centre = Select), a
+/// press-and-hold sends a hold, and a drag becomes the Apple TV's real-time
+/// touch stream (like swiping the Siri Remote's touch surface).
+private struct DPadTouchSurface: NSViewRepresentable {
+    let onInput: (CompanionButton, InputAction) -> Void
+    let onSwipeBegan: () -> Void
+    let onSwipeChanged: (CGPoint) -> Void
+    let onSwipeEnded: (CGPoint, CGPoint) -> Void
+
+    func makeNSView(context: Context) -> DPadTouchSurfaceView {
+        let view = DPadTouchSurfaceView()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: DPadTouchSurfaceView, context: Context) { update(nsView) }
+
+    private func update(_ view: DPadTouchSurfaceView) {
+        view.onInput = onInput
+        view.onSwipeBegan = onSwipeBegan
+        view.onSwipeChanged = onSwipeChanged
+        view.onSwipeEnded = onSwipeEnded
+    }
+}
+
+private final class DPadTouchSurfaceView: NSView {
+    var onInput: ((CompanionButton, InputAction) -> Void)?
+    var onSwipeBegan: (() -> Void)?
+    var onSwipeChanged: ((CGPoint) -> Void)?
+    var onSwipeEnded: ((CGPoint, CGPoint) -> Void)?
+
+    /// Movement (pt) before a press turns into a swipe. Generous, because a
+    /// fingertip wobbles more than a mouse.
+    private let dragThreshold: CGFloat = 10
+    private let holdDelay: TimeInterval = 0.5
+
+    private var start: CGPoint = .zero
+    private var pressedButton: CompanionButton = .select
+    private var holdTimer: Timer?
+    private var holdFired = false
+    private var swiping = false
+    private var translation: CGPoint = .zero
+    private var velocity: CGPoint = .zero
+    private var lastPoint: CGPoint = .zero
+    private var lastTime: TimeInterval = 0
+
+    // Top-left origin, so a drag down is positive y — what the core expects.
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private func button(at point: CGPoint) -> CompanionButton {
+        let dx = point.x - bounds.midX
+        let dy = point.y - bounds.midY
+        if hypot(dx, dy) < bounds.width * 0.25 { return .select }
+        if abs(dx) > abs(dy) { return dx < 0 ? .left : .right }
+        return dy < 0 ? .up : .down
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        start = convert(event.locationInWindow, from: nil)
+        lastPoint = start
+        lastTime = event.timestamp
+        translation = .zero
+        velocity = .zero
+        swiping = false
+        holdFired = false
+        pressedButton = button(at: start)
+
+        holdTimer?.invalidate()
+        holdTimer = Timer.scheduledTimer(withTimeInterval: holdDelay, repeats: false) { [weak self] _ in
+            guard let self, !self.swiping else { return }
+            self.holdFired = true
+            self.onInput?(self.pressedButton, .hold)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !holdFired else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        translation = CGPoint(x: point.x - start.x, y: point.y - start.y)
+
+        if !swiping {
+            guard hypot(translation.x, translation.y) > dragThreshold else { return }
+            swiping = true
+            holdTimer?.invalidate()
+            holdTimer = nil
+            onSwipeBegan?()
+        }
+
+        let dt = max(event.timestamp - lastTime, 1.0 / 1000)
+        let instant = CGPoint(x: (point.x - lastPoint.x) / dt, y: (point.y - lastPoint.y) / dt)
+        // Light smoothing so a single jittery sample doesn't fling the focus.
+        velocity = CGPoint(x: velocity.x * 0.4 + instant.x * 0.6, y: velocity.y * 0.4 + instant.y * 0.6)
+        lastPoint = point
+        lastTime = event.timestamp
+        onSwipeChanged?(translation)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        if swiping {
+            swiping = false
+            // A finger that paused before lifting shouldn't fling.
+            if event.timestamp - lastTime > 0.1 { velocity = .zero }
+            onSwipeEnded?(translation, velocity)
+        } else if !holdFired {
+            onInput?(pressedButton, .click)
+        }
+    }
+
+    deinit { holdTimer?.invalidate() }
+}
+
+// MARK: - Dictation
+
+extension Notification.Name {
+    /// Posted by the mic button: open the "type on Apple TV" field and start macOS dictation.
+    static let startDictation = Notification.Name("itsytv.startDictation")
+}
+
+/// Speak instead of typing: opens the text field and starts macOS dictation, and the
+/// dictated words are sent to the Apple TV's on-screen keyboard (search boxes etc.).
+/// This is dictation, not Siri – the Apple TV only gets text.
+struct DictateButton: View {
+    let size: CGFloat
+    @State private var blinkOpacity: Double = 0
+
+    var body: some View {
+        Image(systemName: "mic.fill")
+            .font(.system(size: size * 0.33, weight: .medium))
+            .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
+            .frame(width: size, height: size)
+            .background(Circle().fill(Color(nsColor: DS.Colors.remoteButton)))
+            .overlay(Circle().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
+            .overlay(RemoteButtonGesture { action in
+                guard action == .click else { return }
+                blinkOpacity = 0.25
+                withAnimation(.easeOut(duration: 0.2)) { blinkOpacity = 0 }
+                NotificationCenter.default.post(name: .startDictation, object: nil)
+            })
+            .help("Dictate to the Apple TV")
+            .accessibilityLabel("Dictate")
+    }
+}
+
+/// Focus the remote's text field (if it isn't already) and ask AppKit to start dictation.
+private func beginDictation(in window: NSWindow?) {
+    guard let window else { return }
+    func firstEditableField(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable { return field }
+        for sub in view.subviews { if let f = firstEditableField(in: sub) { return f } }
+        return nil
+    }
+    if !(window.firstResponder is NSTextView), let content = window.contentView,
+       let field = firstEditableField(in: content) {
+        window.makeFirstResponder(field)
+    }
+    NSApp.sendAction(Selector(("startDictation:")), to: nil, from: nil)
+}
+
 struct DPadView: View {
     @Environment(AppleTVManager.self) private var manager
     let onPress: (CompanionButton, InputAction) -> Void
@@ -916,23 +1229,22 @@ struct DPadView: View {
                 .fill(Color(nsColor: DS.Colors.remoteButtonForeground).opacity(0.08))
                 .frame(width: size * 0.5, height: size * 0.5)
                 .overlay(Circle().fill(.white.opacity(manager.heldButton == .select ? 0.22 : 0)).allowsHitTesting(false))
-                .overlay(RemoteButtonGesture { action in press(.select, action) })
                 .shortcutHint(.select)
                 .help("Return")
 
             // Direction dots
             VStack {
-                DPadDot(shortcut: .up) { action in press(.up, action) }
+                DPadDot(shortcut: .up)
                 Spacer()
-                DPadDot(shortcut: .down) { action in press(.down, action) }
+                DPadDot(shortcut: .down)
             }
             .frame(height: size)
             .padding(.vertical, 12)
 
             HStack {
-                DPadDot(shortcut: .left) { action in press(.left, action) }
+                DPadDot(shortcut: .left)
                 Spacer()
-                DPadDot(shortcut: .right) { action in press(.right, action) }
+                DPadDot(shortcut: .right)
             }
             .frame(width: size)
             .padding(.horizontal, 12)
@@ -942,6 +1254,16 @@ struct DPadView: View {
                 .frame(width: size, height: size)
                 .allowsHitTesting(false)
         }
+        // Tap / hold / drag anywhere on the pad (touch screen, mouse, trackpad click).
+        .overlay(
+            DPadTouchSurface(
+                onInput: { button, action in press(button, action) },
+                onSwipeBegan: { manager.touchBegan(referenceSize: CGSize(width: size * 1.5, height: size * 1.5)) },
+                onSwipeChanged: { manager.touchMoved(translation: $0) },
+                onSwipeEnded: { manager.touchEnded(translation: $0, velocity: $1) }
+            )
+            .clipShape(Circle())
+        )
         // Swipe over the pad (trackpad / Magic Mouse) streams as a touch,
         // matching iOS. Hit testing stays off so button clicks pass through.
         .overlay(
@@ -961,14 +1283,13 @@ struct DPadView: View {
 
 struct DPadDot: View {
     let shortcut: RemoteShortcut
-    let action: (InputAction) -> Void
 
     var body: some View {
+        // Visual only — DPadTouchSurface handles input over the whole pad.
         Circle()
             .fill(Color(nsColor: DS.Colors.remoteButtonForeground))
             .frame(width: 5, height: 5)
             .frame(width: 30, height: 30)
-            .overlay(RemoteButtonGesture(onInput: action))
             .shortcutHint(shortcut)
             .help(shortcut.label)
     }
@@ -982,6 +1303,15 @@ struct RemoteCircleButton: View {
     let size: CGFloat
     let action: (InputAction) -> Void
     @State private var blinkOpacity: Double = 0
+
+    init(imageName: String, button: CompanionButton, shortcut: RemoteShortcut, size: CGFloat,
+         onInput action: @escaping (InputAction) -> Void) {
+        self.imageName = imageName
+        self.button = button
+        self.shortcut = shortcut
+        self.size = size
+        self.action = action
+    }
 
     /// Its key is being held down on the keyboard.
     private var isHeld: Bool { manager.heldButton == button }
@@ -1020,6 +1350,7 @@ struct VolumePill: View {
     @Environment(AppleTVManager.self) private var manager
     let width: CGFloat
     let height: CGFloat
+    var horizontal = false
     let onUp: () -> Void
     let onDown: () -> Void
     @State private var blinkOpacity: Double = 0
@@ -1029,11 +1360,26 @@ struct VolumePill: View {
         withAnimation(.easeOut(duration: 0.2)) { blinkOpacity = 0 }
     }
 
+    private var minusButton: some View {
+        Button(action: { blink(); onDown() }) {
+            Image(systemName: "minus")
+                .font(.system(size: min(width, height) * 0.3, weight: .medium))
+                .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("−")
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
+        let layout = horizontal ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        layout {
+            // Horizontal puts − on the left, + on the right.
+            if horizontal { minusButton }
             Button(action: { blink(); onUp() }) {
                 Image(systemName: "plus")
-                    .font(.system(size: width * 0.3, weight: .medium))
+                    .font(.system(size: min(width, height) * 0.3, weight: .medium))
                     .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
@@ -1041,15 +1387,7 @@ struct VolumePill: View {
             .buttonStyle(.plain)
             .help("+")
 
-            Button(action: { blink(); onDown() }) {
-                Image(systemName: "minus")
-                    .font(.system(size: width * 0.3, weight: .medium))
-                    .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("−")
+            if !horizontal { minusButton }
         }
         .frame(width: width, height: height)
         .background(Capsule().fill(Color(nsColor: DS.Colors.remoteButton)))
@@ -1077,9 +1415,9 @@ private struct PowerButton: View {
 
     var body: some View {
         Image(systemName: "power")
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: TouchMode.shared.isTouch ? 18 : 14, weight: .medium))
             .foregroundStyle(.secondary)
-            .frame(width: 24, height: 24)
+            .frame(width: TouchMode.shared.isTouch ? 44 : 32, height: TouchMode.shared.isTouch ? 44 : 32)
             .background(Circle().fill(Color.secondary.opacity(0.12)))
             .onTapGesture {
                 guard !didLongPress else {

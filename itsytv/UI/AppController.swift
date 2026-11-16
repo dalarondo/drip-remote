@@ -16,6 +16,12 @@ final class AppController: NSObject, NSMenuDelegate {
     private let iconLoader: AppIconLoader
     private var observation: AnyCancellable?
     private var panel: NSPanel?
+    private var panelHostingView: NSView?
+    /// Touch layout: the panel is snapped to the right screen edge.
+    private var isDocked = false
+    private var isRedocking = false
+    /// Where the panel was before it snapped to the edge (top-left, AppKit coords).
+    private var undockedTopLeft: NSPoint?
     private var panelDeviceID: String?
     private var keyboardMonitor: Any?
     private var keyHold: KeyHold?
@@ -26,6 +32,8 @@ final class AppController: NSObject, NSMenuDelegate {
         self.iconLoader = iconLoader
         super.init()
         setupStatusItem()
+        // Watch the menu bar icon too, so opening the remote with a finger counts as touch.
+        if let button = statusItem.button { TouchMode.shared.attachSniffer(to: button) }
         rebuildMenu()
         startObserving()
         setupHotkeyHandler()
@@ -536,7 +544,7 @@ final class AppController: NSObject, NSMenuDelegate {
         maskImage.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius, bottom: cornerRadius, right: cornerRadius)
         maskImage.resizingMode = .stretch
         
-        let vibrancy = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 176, height: 400))
+        let vibrancy = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: TouchMode.shared.panelWidth, height: 400))
         vibrancy.material = .menu
         vibrancy.state = .active
         vibrancy.maskImage = maskImage
@@ -550,12 +558,13 @@ final class AppController: NSObject, NSMenuDelegate {
         ])
 
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 176, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: TouchMode.shared.panelWidth, height: 400),
             styleMask: [.nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         panel.contentView = vibrancy
+        TouchMode.shared.attachSniffer(to: vibrancy)
         let alwaysOnTop = UserDefaults.standard.object(forKey: "alwaysOnTop") as? Bool ?? true
         panel.isFloatingPanel = alwaysOnTop
         panel.level = alwaysOnTop ? .statusBar : .normal
@@ -584,7 +593,7 @@ final class AppController: NSObject, NSMenuDelegate {
             log.info("showPanel: using saved origin (\(origin.x), \(origin.y))")
             panel.setFrameOrigin(origin)
         } else if !isIconHidden, let buttonFrame = statusItem.button?.window?.frame {
-            let x = buttonFrame.midX - 88
+            let x = buttonFrame.midX - panel.frame.width / 2
             let y = buttonFrame.minY - panel.frame.height
             log.info("showPanel: using status bar fallback (\(x), \(y))")
             panel.setFrameOrigin(NSPoint(x: x, y: y))
@@ -598,8 +607,14 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         self.panel = panel
+        self.panelHostingView = hostingView
         self.panelDeviceID = manager.connectedDeviceID
         installKeyboardMonitor()
+
+        // Touch layout: snap to the right edge, and follow touch ↔ pointer changes.
+        TouchMode.shared.syncBaseline()
+        TouchMode.shared.onChange = { [weak self] in self?.applyPanelLayout(animated: true) }
+        if TouchMode.shared.isTouch { applyPanelLayout(animated: false) }
 
         // Observe "Always on top" toggle changes while panel is open
         alwaysOnTopObserver = NotificationCenter.default.addObserver(
@@ -638,7 +653,63 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
+    // MARK: - Touch layout
+
+    /// The panel's frame when snapped to the right edge of its screen.
+    private func dockedFrame(width: CGFloat, height: CGFloat, panel: NSPanel) -> NSRect {
+        let visible = (panel.screen ?? NSScreen.main)?.visibleFrame ?? panel.frame
+        let margin: CGFloat = 8
+        let h = min(height, visible.height - margin * 2)
+        return NSRect(x: visible.maxX - width - margin, y: visible.maxY - h - margin, width: width, height: h)
+    }
+
+    /// Resize for the current layout and snap to the right edge (touch) or back
+    /// to where the panel was (pointer).
+    private func applyPanelLayout(animated: Bool) {
+        // Let SwiftUI lay out the new width first, then measure.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let panel = self.panel else { return }
+            let touch = TouchMode.shared.isTouch
+            let width = TouchMode.shared.panelWidth
+            panel.contentView?.layoutSubtreeIfNeeded()
+            let fitted = self.panelHostingView?.fittingSize.height ?? 0
+            let height = fitted > 50 ? fitted : panel.frame.height
+
+            let target: NSRect
+            if touch {
+                if !self.isDocked {
+                    self.undockedTopLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+                    self.isDocked = true
+                }
+                target = self.dockedFrame(width: width, height: height, panel: panel)
+            } else {
+                self.isDocked = false
+                let topLeft = self.undockedTopLeft ?? NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+                var frame = NSRect(x: topLeft.x, y: topLeft.y - height, width: width, height: height)
+                if !self.isPointOnScreen(frame.origin, panelSize: frame.size) {
+                    frame = self.dockedFrame(width: width, height: height, panel: panel)
+                }
+                target = frame
+            }
+            self.isRedocking = true
+            panel.setFrame(target, display: true, animate: animated)
+            self.isRedocking = false
+        }
+    }
+
+    fileprivate func panelDidResize(_ panel: NSPanel) {
+        guard isDocked, !isRedocking, TouchMode.shared.isTouch else { return }
+        let target = dockedFrame(width: panel.frame.width, height: panel.frame.height, panel: panel)
+        guard abs(target.maxX - panel.frame.maxX) > 0.5 || abs(target.maxY - panel.frame.maxY) > 0.5 else { return }
+        isRedocking = true
+        panel.setFrame(target, display: true)
+        isRedocking = false
+    }
+
     private func dismissPanel() {
+        TouchMode.shared.onChange = nil
+        isDocked = false
+        undockedTopLeft = nil
         removeKeyboardMonitor()
         if let observer = alwaysOnTopObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -651,9 +722,13 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func savePanelPosition() {
-        guard let frame = panel?.frame else {
+        guard var frame = panel?.frame else {
             log.debug("save: no panel frame")
             return
+        }
+        // Remember where it was before it snapped to the edge, not the docked spot.
+        if isDocked, let topLeft = undockedTopLeft {
+            frame.origin = NSPoint(x: topLeft.x, y: topLeft.y - frame.height)
         }
         guard let deviceID = panelDeviceID else {
             log.debug("save: no panelDeviceID")
@@ -857,6 +932,7 @@ struct PanelMenuButton: View {
     @AppStorage("showAppsSearch") private var showAppsSearch = false
     @AppStorage("showShortcutHints") private var showShortcutHints = false
     @AppStorage("showArtwork") private var showArtwork = true
+    @AppStorage(TouchLayoutPreference.defaultsKey) private var touchLayout = TouchLayoutPreference.auto.rawValue
     @State private var showingHotkeyRecorder = false
     @State private var currentHotkey: ShortcutKeys?
 
@@ -866,6 +942,9 @@ struct PanelMenuButton: View {
             Toggle("Show app search", isOn: $showAppsSearch)
                 .keyboardShortcut("f", modifiers: .command)
             Toggle("Show artwork", isOn: $showArtwork)
+            Picker("Touch layout", selection: $touchLayout) {
+                ForEach(TouchLayoutPreference.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
+            }
             Divider()
             Toggle("Show shortcut hints", isOn: $showShortcutHints)
             Button("Keyboard shortcuts…") {
@@ -887,9 +966,9 @@ struct PanelMenuButton: View {
             ZStack {
                 Circle()
                     .fill(Color.secondary.opacity(0.15))
-                    .frame(width: 20, height: 20)
+                    .frame(width: TouchMode.shared.isTouch ? 36 : 20, height: TouchMode.shared.isTouch ? 36 : 20)
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: TouchMode.shared.isTouch ? 14 : 9, weight: .bold))
                     .foregroundStyle(.secondary)
             }
         }
@@ -1049,9 +1128,9 @@ struct PanelCloseButton: View {
             ZStack {
                 Circle()
                     .fill(Color.secondary.opacity(0.2))
-                    .frame(width: 28, height: 28)
+                    .frame(width: TouchMode.shared.isTouch ? 36 : 28, height: TouchMode.shared.isTouch ? 36 : 28)
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: TouchMode.shared.isTouch ? 14 : 12, weight: .bold))
                     .foregroundStyle(.secondary)
             }
             .contentShape(Circle())
@@ -1077,7 +1156,7 @@ struct PanelContentView: View {
                 EmptyView()
             }
         }
-        .frame(width: 176)
+        .frame(width: TouchMode.shared.panelWidth)
     }
 }
 
@@ -1089,8 +1168,14 @@ extension AppController: NSWindowDelegate {
         if (notification.object as? NSPanel) === panel { releaseHeldKey(reason: "panel lost focus") }
     }
 
+    func windowDidResize(_ notification: Notification) {
+        if let resized = notification.object as? NSPanel, resized === panel { panelDidResize(resized) }
+    }
+
     func windowWillClose(_ notification: Notification) {
         if (notification.object as? NSPanel) === panel {
+            TouchMode.shared.onChange = nil
+            isDocked = false
             savePanelPosition()
             if manager.connectionStatus != .disconnected {
                 manager.disconnect()
