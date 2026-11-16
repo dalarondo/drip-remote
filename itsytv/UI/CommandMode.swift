@@ -50,6 +50,11 @@ private final class CommandModeWindow: NSWindow {
 final class CommandModeState {
     /// Controls are dimmed after a while without input.
     var dimmed = false
+    /// The text field is open, so the physical keyboard is needed.
+    var textEntryActive = false {
+        didSet { if textEntryActive != oldValue { onTextEntryChange?() } }
+    }
+    @ObservationIgnored var onTextEntryChange: (() -> Void)?
 }
 
 final class CommandModeController {
@@ -62,6 +67,12 @@ final class CommandModeController {
 
     /// Seconds without input before the controls dim.
     private let idleDelay: TimeInterval = 30
+
+    /// Keyboard backlight: off in command mode, back on while the keyboard is in use –
+    /// the text field is open, or a key was pressed in the last few seconds.
+    private let keyLightDuration: TimeInterval = 8
+    private var keyLightTimer: Timer?
+    private var keyRecentlyPressed = false
 
     /// Called when the user leaves command mode from inside it.
     var onExit: (() -> Void)?
@@ -118,13 +129,47 @@ final class CommandModeController {
         activityMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseDragged, .mouseMoved, .keyDown, .scrollWheel]
         ) { [weak self] event in
-            if event.window === self?.window { self?.noteActivity() }
+            if event.window === self?.window {
+                self?.noteActivity()
+                if event.type == .keyDown { self?.noteKeyPress() }
+            }
             return event
         }
         noteActivity()
+
+        state.textEntryActive = false
+        state.onTextEntryChange = { [weak self] in self?.updateKeyboardBacklight() }
+        keyRecentlyPressed = false
+        updateKeyboardBacklight()
+    }
+
+    private func noteKeyPress() {
+        keyRecentlyPressed = true
+        keyLightTimer?.invalidate()
+        keyLightTimer = Timer.scheduledTimer(withTimeInterval: keyLightDuration, repeats: false) { [weak self] _ in
+            self?.keyRecentlyPressed = false
+            self?.updateKeyboardBacklight()
+        }
+        updateKeyboardBacklight()
+    }
+
+    private func updateKeyboardBacklight() {
+        guard window != nil, UserDefaults.standard.object(forKey: "commandModeDimKeyboard") as? Bool ?? true else {
+            KeyboardBacklight.shared.restore()
+            return
+        }
+        if state.textEntryActive || keyRecentlyPressed {
+            KeyboardBacklight.shared.restore()
+        } else {
+            KeyboardBacklight.shared.dim()
+        }
     }
 
     func close() {
+        keyLightTimer?.invalidate()
+        keyLightTimer = nil
+        state.onTextEntryChange = nil
+        KeyboardBacklight.shared.restore()
         if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }
         activityMonitor = nil
         idleTimer?.invalidate()
@@ -273,6 +318,7 @@ struct CommandModeView: View {
             }
         }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in toggleKeyboard() }
+        .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
     }
 
     private func toggleKeyboard() {

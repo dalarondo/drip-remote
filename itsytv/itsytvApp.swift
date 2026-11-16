@@ -66,5 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         appController?.cleanup()
+        // Never quit with the keyboard backlight left off by command mode.
+        KeyboardBacklight.shared.restore()
     }
 }

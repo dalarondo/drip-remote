@@ -970,6 +970,7 @@ struct PanelMenuButton: View {
     @AppStorage("showShortcutHints") private var showShortcutHints = false
     @AppStorage("showArtwork") private var showArtwork = true
     @AppStorage("commandModeRed") private var commandModeRed = false
+    @AppStorage("commandModeDimKeyboard") private var commandModeDimKeyboard = true
     @AppStorage("commandModeShowClock") private var commandModeShowClock = true
     @AppStorage(TouchLayoutPreference.defaultsKey) private var touchLayout = TouchLayoutPreference.auto.rawValue
     @State private var showingHotkeyRecorder = false
@@ -983,6 +984,7 @@ struct PanelMenuButton: View {
                 }
                 Divider()
                 Toggle("Red on black", isOn: $commandModeRed)
+                Toggle("Dim keyboard backlight", isOn: $commandModeDimKeyboard)
                 Toggle("Show time", isOn: $commandModeShowClock)
             }
             Divider()
