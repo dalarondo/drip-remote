@@ -55,6 +55,8 @@ final class CommandModeState {
         didSet { if textEntryActive != oldValue { onTextEntryChange?() } }
     }
     @ObservationIgnored var onTextEntryChange: (() -> Void)?
+    /// The apps page is showing instead of the controls.
+    var showingApps = false
     /// Set when leaving, so the controls morph back to their round shapes first.
     var leaving = false
 }
@@ -75,6 +77,8 @@ final class CommandModeController {
     private let keyLightDuration: TimeInterval = 8
     private var keyLightTimer: Timer?
     private var keyRecentlyPressed = false
+
+    private var swipeStart: (point: NSPoint, time: TimeInterval)?
 
     private let cursorHideDelay: TimeInterval = 3
     private var cursorTimer: Timer?
@@ -152,6 +156,7 @@ final class CommandModeController {
             if event.window === self?.window {
                 self?.noteActivity()
                 self?.updateCursor(for: event)
+                self?.trackPageSwipe(event)
                 if event.type == .keyDown { self?.noteKeyPress() }
             }
             return event
@@ -160,6 +165,7 @@ final class CommandModeController {
 
         isLeaving = false
         state.leaving = false
+        state.showingApps = false
         awakeActivity = ProcessInfo.processInfo.beginActivity(
             options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
             reason: "Command mode control panel is on screen"
@@ -176,6 +182,32 @@ final class CommandModeController {
         updateKeyboardBacklight()
 
         NSCursor.setHiddenUntilMouseMoves(true)
+    }
+
+    /// A long, mostly horizontal swipe turns the page: left shows the apps, right goes back.
+    /// Swipes that start on the D-pad are left alone – those belong to the Apple TV.
+    private func trackPageSwipe(_ event: NSEvent) {
+        guard let window, let content = window.contentView else { return }
+        switch event.type {
+        case .leftMouseDown:
+            let hit = content.hitTest(event.locationInWindow)
+            let onDPad = hit.map { String(describing: type(of: $0)).contains("DPadTouchSurface") } ?? false
+            swipeStart = onDPad ? nil : (event.locationInWindow, event.timestamp)
+        case .leftMouseUp:
+            guard let start = swipeStart else { return }
+            swipeStart = nil
+            let dx = event.locationInWindow.x - start.point.x
+            let dy = event.locationInWindow.y - start.point.y
+            let long = abs(dx) > content.bounds.width * 0.3
+            guard long, abs(dy) < abs(dx) * 0.4, event.timestamp - start.time < 1.2 else { return }
+            if dx < 0, !state.showingApps, !state.textEntryActive {
+                state.showingApps = true
+            } else if dx > 0, state.showingApps {
+                state.showingApps = false
+            }
+        default:
+            break
+        }
     }
 
     /// The cursor is hidden in command mode. Moving a real mouse / trackpad shows it,
@@ -265,6 +297,7 @@ final class CommandModeController {
 
 struct CommandModeView: View {
     @Environment(AppleTVManager.self) private var manager
+    @Environment(AppIconLoader.self) private var iconLoader
     let state: CommandModeState
     let topInset: CGFloat
     let onExit: () -> Void
@@ -312,79 +345,94 @@ struct CommandModeView: View {
                     }
                     .fixedSize(horizontal: false, vertical: true)
 
-                    // Middle: square D-pad fills the left half, pill buttons fill the right half
-                    HStack(spacing: unit * 0.6) {
-                        GeometryReader { half in
-                            // Starts as the remote's round pad, then grows into the square.
-                            let round = min(half.size.width, half.size.height) * 0.62
-                            let full = min(half.size.width, half.size.height)
-                            DPadView(
-                                onPress: { b, action in manager.pressButton(b, action: action) },
-                                size: morphed ? half.size.width : round,
-                                swipeEnabled: true,
-                                height: morphed ? half.size.height : round,
-                                cornerRadius: morphed ? full * 0.12 : round / 2
-                            )
-                            .frame(width: half.size.width, height: half.size.height)
-                        }
+                    // Two pages: the controls, and the apps a long left-swipe away.
+                    GeometryReader { page in
+                        ZStack {
+                            VStack(spacing: unit * 0.5) {
+                            // Middle: square D-pad fills the left half, pill buttons fill the right half
+                            HStack(spacing: unit * 0.6) {
+                                GeometryReader { half in
+                                    // Starts as the remote's round pad, then grows into the square.
+                                    let round = min(half.size.width, half.size.height) * 0.62
+                                    let full = min(half.size.width, half.size.height)
+                                    DPadView(
+                                        onPress: { b, action in manager.pressButton(b, action: action) },
+                                        size: morphed ? half.size.width : round,
+                                        swipeEnabled: true,
+                                        height: morphed ? half.size.height : round,
+                                        cornerRadius: morphed ? full * 0.12 : round / 2
+                                    )
+                                    .frame(width: half.size.width, height: half.size.height)
+                                }
 
-                        GeometryReader { half in
-                            // Three columns, three rows, sized to fill the half.
-                            // Starts as round buttons, then stretches into pills.
-                            let fullW = (half.size.width - gap * 2) / 3
-                            let fullH = (half.size.height - gap * 2) / 3
-                            let round = min(fullW, fullH) * 0.7
-                            let pillW = morphed ? fullW : round
-                            let pillH = morphed ? fullH : round
+                                GeometryReader { half in
+                                    // Three columns, three rows, sized to fill the half.
+                                    // Starts as round buttons, then stretches into pills.
+                                    let fullW = (half.size.width - gap * 2) / 3
+                                    let fullH = (half.size.height - gap * 2) / 3
+                                    let round = min(fullW, fullH) * 0.7
+                                    let pillW = morphed ? fullW : round
+                                    let pillH = morphed ? fullH : round
 
-                            VStack(spacing: gap) {
-                                HStack(spacing: gap) {
-                                    RemoteCircleButton(imageName: "btnBack", button: .menu, shortcut: .back, size: pillH, width: pillW) { action in
-                                        if action == .hold {
-                                            manager.pressButton(.home)
-                                        } else {
-                                            manager.pressButton(.menu, action: action)
+                                    VStack(spacing: gap) {
+                                        HStack(spacing: gap) {
+                                            RemoteCircleButton(imageName: "btnBack", button: .menu, shortcut: .back, size: pillH, width: pillW) { action in
+                                                if action == .hold {
+                                                    manager.pressButton(.home)
+                                                } else {
+                                                    manager.pressButton(.menu, action: action)
+                                                }
+                                            }
+                                            RemoteCircleButton(imageName: "btnHome", button: .home, shortcut: .home, size: pillH, width: pillW) { action in
+                                                manager.pressButton(.home, action: action)
+                                            }
+                                            DictateButton(size: pillH, width: pillW)
                                         }
+                                        HStack(spacing: gap) {
+                                            RemoteCircleButton(imageName: "btnPlayPause", button: .playPause, shortcut: .playPause, size: pillH, width: pillW) { action in
+                                                manager.pressButton(.playPause, action: action)
+                                            }
+                                            RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: pillH, width: pillW) { action in
+                                                guard action == .click else { return }
+                                                manager.toggleMute()
+                                            }
+                                            glyphButton("keyboard", size: pillH, width: pillW) { toggleKeyboard() }
+                                        }
+                                        VolumePill(
+                                            width: morphed ? half.size.width : round * 3 + gap * 2,
+                                            height: pillH,
+                                            horizontal: true,
+                                            onUp: { manager.pressButton(.volumeUp) },
+                                            onDown: { manager.pressButton(.volumeDown) }
+                                        )
                                     }
-                                    RemoteCircleButton(imageName: "btnHome", button: .home, shortcut: .home, size: pillH, width: pillW) { action in
-                                        manager.pressButton(.home, action: action)
-                                    }
-                                    DictateButton(size: pillH, width: pillW)
+                                    .frame(width: half.size.width, height: half.size.height)
                                 }
-                                HStack(spacing: gap) {
-                                    RemoteCircleButton(imageName: "btnPlayPause", button: .playPause, shortcut: .playPause, size: pillH, width: pillW) { action in
-                                        manager.pressButton(.playPause, action: action)
-                                    }
-                                    RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: pillH, width: pillW) { action in
-                                        guard action == .click else { return }
-                                        manager.toggleMute()
-                                    }
-                                    glyphButton("keyboard", size: pillH, width: pillW) { toggleKeyboard() }
-                                }
-                                VolumePill(
-                                    width: morphed ? half.size.width : round * 3 + gap * 2,
-                                    height: pillH,
-                                    horizontal: true,
-                                    onUp: { manager.pressButton(.volumeUp) },
-                                    onDown: { manager.pressButton(.volumeDown) }
-                                )
                             }
-                            .frame(width: half.size.width, height: half.size.height)
-                        }
-                    }
-                    .padding(.horizontal, unit * 0.4)
-                    .frame(maxHeight: .infinity)
-                    .opacity(isConnected ? 1 : 0.35)
-                    .allowsHitTesting(isConnected)
-
-                    // Bottom: now playing, or the text field while typing / dictating
-                    if showingKeyboard {
-                        keyboardField(unit: unit)
-                            .padding(.bottom, unit * 0.5)
-                    } else {
-                        NowPlayingBar()
-                            .frame(width: min(geo.size.width * 0.6, unit * 8))
+                            .padding(.horizontal, unit * 0.4)
+                            .frame(maxHeight: .infinity)
                             .opacity(isConnected ? 1 : 0.35)
+                            .allowsHitTesting(isConnected)
+
+                            // Bottom: now playing, or the text field while typing / dictating
+                            if showingKeyboard {
+                                keyboardField(unit: unit)
+                                    .padding(.bottom, unit * 0.5)
+                            } else {
+                                NowPlayingBar()
+                                    .frame(width: min(geo.size.width * 0.6, unit * 8))
+                                    .opacity(isConnected ? 1 : 0.35)
+                            }
+                            }
+                            .offset(x: state.showingApps ? -page.size.width * 1.1 : 0)
+                            .allowsHitTesting(!state.showingApps)
+
+                            appsPage(unit: unit)
+                                .offset(x: state.showingApps ? 0 : page.size.width * 1.1)
+                                .allowsHitTesting(state.showingApps)
+                        }
+                        .frame(width: page.size.width, height: page.size.height)
+                        .animation(.spring(response: 0.45, dampingFraction: 0.88), value: state.showingApps)
                     }
                 }
                 .padding(.horizontal, unit * 0.4)
@@ -415,6 +463,69 @@ struct CommandModeView: View {
             showingKeyboard = false
             withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { morphed = false }
         }
+    }
+
+    /// Apps grid: tap an app to launch it and return to the controls.
+    private func appsPage(unit: CGFloat) -> some View {
+        let columns = [GridItem(.adaptive(minimum: unit * 2.3), spacing: unit * 0.4)]
+        return VStack(spacing: unit * 0.3) {
+            HStack {
+                glyphButton("chevron.left", size: unit * 0.7) { state.showingApps = false }
+                    .help("Back to the controls")
+                Spacer()
+            }
+            if manager.installedApps.isEmpty {
+                Text("Loading apps…")
+                    .font(.system(size: unit * 0.25))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: unit * 0.4) {
+                        ForEach(manager.orderedApps, id: \.bundleID) { app in
+                            Button {
+                                manager.launchApp(bundleID: app.bundleID)
+                                state.showingApps = false
+                            } label: {
+                                appTile(app, unit: unit)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, unit * 0.1)
+                }
+            }
+        }
+        .padding(.horizontal, unit * 0.4)
+        .onAppear { iconLoader.loadIcons(for: manager.installedApps) }
+        .onChange(of: manager.installedApps.map(\.bundleID)) { iconLoader.loadIcons(for: manager.installedApps) }
+    }
+
+    private func appTile(_ app: (bundleID: String, name: String), unit: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: unit * 0.22)
+        return VStack(spacing: unit * 0.1) {
+            Group {
+                if let icon = iconLoader.icons[app.bundleID] {
+                    Color.clear.overlay {
+                        Image(nsImage: icon).resizable().aspectRatio(contentMode: .fill)
+                    }
+                    .clipShape(shape)
+                } else {
+                    Image(systemName: AppIconFetcher.builtInSymbols[app.bundleID] ?? "app")
+                        .font(.system(size: unit * 0.5, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(ControlBackground(shape: shape))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: unit * 1.3)
+            Text(app.name)
+                .font(.system(size: unit * 0.2))
+                .foregroundStyle(.white.opacity(0.6))
+                .lineLimit(1)
+        }
+        .contentShape(Rectangle())
     }
 
     private func toggleKeyboard() {

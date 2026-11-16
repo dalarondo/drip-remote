@@ -871,10 +871,24 @@ private class RemoteButtonGestureNSView: NSView {
     var onInput: ((InputAction) -> Void)?
     private var holdTimer: Timer?
     private var holdFired = false
+    private var downLocation: NSPoint = .zero
+    private var dragCancelled = false
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// Sliding off a button (e.g. a page swipe that starts on it) cancels the press.
+    override func mouseDragged(with event: NSEvent) {
+        let p = event.locationInWindow
+        if hypot(p.x - downLocation.x, p.y - downLocation.y) > 24 {
+            dragCancelled = true
+            holdTimer?.invalidate()
+            holdTimer = nil
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
+        downLocation = event.locationInWindow
+        dragCancelled = false
         holdFired = false
         holdTimer?.invalidate()
         holdTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
@@ -887,7 +901,7 @@ private class RemoteButtonGestureNSView: NSView {
     override func mouseUp(with event: NSEvent) {
         holdTimer?.invalidate()
         holdTimer = nil
-        guard !holdFired else { return }
+        guard !holdFired, !dragCancelled else { return }
         onInput?(.click)
     }
 }
