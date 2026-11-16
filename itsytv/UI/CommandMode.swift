@@ -152,6 +152,7 @@ struct CommandModeView: View {
 
     @State private var showingKeyboard = false
     @State private var keyboardText = ""
+    @AppStorage("commandModeShowClock") private var showClock = true
 
     private var isConnected: Bool { manager.connectionStatus == .connected }
 
@@ -167,7 +168,15 @@ struct CommandModeView: View {
                 VStack(spacing: unit * 0.5) {
                     // Top: time, with the device name and exit in the corners
                     ZStack {
-                        clock(unit: unit)
+                        // Tap the time to hide it (more pixels off); tap the same spot to bring it back.
+                        ZStack {
+                            clock(unit: unit)
+                                .opacity(showClock ? 1 : 0)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.25)) { showClock.toggle() }
+                        }
                         HStack(alignment: .top) {
                             Text(isConnected ? (manager.connectedDeviceName ?? "Apple TV") : "Reconnecting…")
                                 .font(.system(size: unit * 0.22, weight: .medium))
