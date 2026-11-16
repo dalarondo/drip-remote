@@ -20,9 +20,8 @@ final class ClapDetector: NSObject, SNResultsObserving {
 
     // Tuning
     private let minLevel: Float = 0.05          // absolute RMS floor for a clap
-    private let ambientMultiple: Float = 6      // …and this many times the room level
-    private let maxThreshold: Float = 0.2       // …but never demand more than this, however loud the TV
-    private let decayWithin: TimeInterval = 0.25 // a clap must die away this fast
+    private let ambientMultiple: Float = 3      // …and this many times the room level
+    private let decayWithin: TimeInterval = 0.3 // a clap must die away this fast
     private let minGap: TimeInterval = 0.15
     private let maxGap: TimeInterval = 0.7
     private let classifierThreshold: Double = 0.12
@@ -165,7 +164,8 @@ final class ClapDetector: NSObject, SNResultsObserving {
     // MARK: - Onset detection (on `queue`)
 
     private func process(level: Float, now: TimeInterval, bufferDuration: TimeInterval) {
-        let threshold = min(maxThreshold, max(minLevel, ambient * ambientMultiple))
+        // "Loud" is relative to the room, so it still works over TV sound.
+        let threshold = max(minLevel, ambient * ambientMultiple)
         let loud = level > threshold
 
         // A new loud burst starts a possible clap.
@@ -174,18 +174,23 @@ final class ClapDetector: NSObject, SNResultsObserving {
         }
         wasLoud = loud
 
-        // A clap dies away quickly; speech, music and rumble don't.
-        if let onset = pendingOnset {
-            if level < onset.level * 0.4 {
+        // A clap dies away quickly; speech, music and rumble don't. "Died away" means it
+        // fell to half its peak, or back to roughly the room level – with the TV playing
+        // the level never gets far below the room, so a fixed fraction alone would fail.
+        if var onset = pendingOnset {
+            onset.level = max(onset.level, level)
+            pendingOnset = onset
+            if level < max(onset.level * 0.5, ambient * 2) {
                 pendingOnset = nil
+                log.notice("sharp sound: peak \(onset.level, format: .fixed(precision: 3)) room \(self.ambient, format: .fixed(precision: 3))")
                 sharpOnset(at: onset.time, now: now)
             } else if now - onset.time > decayWithin {
                 pendingOnset = nil
             }
         }
 
-        // Track the room level only while it's quiet-ish, so claps don't raise the bar.
-        if !loud { ambient = ambient * 0.97 + level * 0.03 }
+        // Track the room level only between bursts, so claps don't raise the bar.
+        if !loud && pendingOnset == nil { ambient = ambient * 0.97 + level * 0.03 }
 
         // Periodic health line, so a stall can be diagnosed from the log.
         if now - lastHealthLog > 15 {
@@ -202,7 +207,6 @@ final class ClapDetector: NSObject, SNResultsObserving {
     private func sharpOnset(at time: TimeInterval, now: TimeInterval) {
         let gap = time - lastSharpOnset
         lastSharpOnset = time
-        log.notice("sharp sound, \(gap, format: .fixed(precision: 2))s after the previous one")
         guard gap >= minGap, gap <= maxGap, now - lastFire > cooldown else { return }
         // Two sharp sounds, clap-spaced. Fire if the classifier agrees (now or shortly).
         if now - lastClassifierHit < classifierWindow {
