@@ -972,7 +972,8 @@ struct PanelMenuButton: View {
     @AppStorage("showArtwork") private var showArtwork = true
     @AppStorage("commandModeRed") private var commandModeRed = false
     @AppStorage("commandModeDimKeyboard") private var commandModeDimKeyboard = true
-    @AppStorage("commandModeShowClock") private var commandModeShowClock = true
+    @AppStorage(CommandTopDisplay.defaultsKey) private var commandModeTopDisplay = CommandTopDisplay.time.rawValue
+    @AppStorage("commandModeBannerText") private var commandModeBannerText = ""
     @AppStorage(TouchLayoutPreference.defaultsKey) private var touchLayout = TouchLayoutPreference.auto.rawValue
     @State private var showingHotkeyRecorder = false
     @State private var currentHotkey: ShortcutKeys?
@@ -986,7 +987,12 @@ struct PanelMenuButton: View {
                 Divider()
                 Toggle("Red on black", isOn: $commandModeRed)
                 Toggle("Dim keyboard backlight", isOn: $commandModeDimKeyboard)
-                Toggle("Show time", isOn: $commandModeShowClock)
+                Picker("Top display", selection: $commandModeTopDisplay) {
+                    ForEach(CommandTopDisplay.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
+                }
+                Button(commandModeBannerText.isEmpty ? "Set banner text…" : "Banner text: \(commandModeBannerText)") {
+                    promptForBannerText()
+                }
             }
             Divider()
             Toggle("Always on top", isOn: $alwaysOnTop)
@@ -1035,6 +1041,24 @@ struct PanelMenuButton: View {
         }
         .onAppear {
             currentHotkey = HotkeyStorage.load(deviceID: deviceID)
+        }
+    }
+
+    /// Menus can't hold a text field, so ask for the banner text in a small dialog.
+    private func promptForBannerText() {
+        let alert = NSAlert()
+        alert.messageText = "Command mode banner"
+        alert.informativeText = "Shown at the top of command mode when you tap the time away. Leave empty for no banner."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = commandModeBannerText
+        field.placeholderString = "Banner text"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            commandModeBannerText = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 

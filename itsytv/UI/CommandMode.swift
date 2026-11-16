@@ -11,6 +11,23 @@ extension Notification.Name {
     static let toggleCommandMode = Notification.Name("itsytv.toggleCommandMode")
 }
 
+/// What the top of command mode shows. Tapping it cycles through these.
+enum CommandTopDisplay: String, CaseIterable {
+    case time = "Time"
+    case banner = "Banner"
+    case nothing = "Nothing"
+
+    static let defaultsKey = "commandModeTopDisplay"
+
+    func next(hasBanner: Bool) -> CommandTopDisplay {
+        switch self {
+        case .time: hasBanner ? .banner : .nothing
+        case .banner: .nothing
+        case .nothing: .time
+        }
+    }
+}
+
 // MARK: - OLED control style
 
 private struct OLEDControlsKey: EnvironmentKey {
@@ -304,7 +321,15 @@ struct CommandModeView: View {
 
     @State private var showingKeyboard = false
     @State private var keyboardText = ""
-    @AppStorage("commandModeShowClock") private var showClock = true
+    @AppStorage(CommandTopDisplay.defaultsKey) private var topDisplayRaw = CommandTopDisplay.time.rawValue
+    @AppStorage("commandModeBannerText") private var bannerText = ""
+
+    private var topDisplay: CommandTopDisplay {
+        let stored = CommandTopDisplay(rawValue: topDisplayRaw) ?? .time
+        // A banner with no text shows nothing.
+        if stored == .banner, bannerText.trimmingCharacters(in: .whitespaces).isEmpty { return .nothing }
+        return stored
+    }
     @State private var morphed = false
     @AppStorage("commandModeRed") private var redOnBlack = false
 
@@ -322,14 +347,25 @@ struct CommandModeView: View {
                 VStack(spacing: unit * 0.5) {
                     // Top: time, with the device name and exit in the corners
                     ZStack {
-                        // Tap the time to hide it (more pixels off); tap the same spot to bring it back.
+                        // Tap cycles the top display: time → banner (if one is set) → nothing → time.
                         ZStack {
                             clock(unit: unit)
-                                .opacity(showClock ? 1 : 0)
+                                .opacity(topDisplay == .time ? 1 : 0)
+                            Text(bannerText)
+                                .font(.system(size: unit * 0.9, weight: .thin, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.3)
+                                .padding(.horizontal, unit * 1.2)
+                                .opacity(topDisplay == .banner ? 1 : 0)
                         }
+                        .frame(maxWidth: .infinity)
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            withAnimation(.easeInOut(duration: 0.25)) { showClock.toggle() }
+                            let hasBanner = !bannerText.trimmingCharacters(in: .whitespaces).isEmpty
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                topDisplayRaw = topDisplay.next(hasBanner: hasBanner).rawValue
+                            }
                         }
                         HStack(alignment: .top) {
                             if !isConnected {
