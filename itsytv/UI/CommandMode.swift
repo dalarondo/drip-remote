@@ -99,6 +99,9 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
 
     private var swipeStart: (point: NSPoint, time: TimeInterval)?
 
+    /// Double clap → play / pause, while command mode is open (opt-in setting).
+    private let clapDetector = ClapDetector()
+
     private let cursorHideDelay: TimeInterval = 3
     private var cursorTimer: Timer?
 
@@ -209,6 +212,15 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         updateKeyboardBacklight()
 
         NSCursor.setHiddenUntilMouseMoves(true)
+
+        if UserDefaults.standard.bool(forKey: "commandModeClap") {
+            clapDetector.onDoubleClap = { [weak self] in
+                guard let self, self.window != nil, self.manager.connectionStatus == .connected else { return }
+                self.manager.pressButton(.playPause)
+                self.noteActivity()
+            }
+            clapDetector.start()
+        }
     }
 
     private func startsOnDPad(windowPoint: NSPoint) -> Bool {
@@ -321,6 +333,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
     }
 
     func close() {
+        clapDetector.stop()
         if let awakeActivity { ProcessInfo.processInfo.endActivity(awakeActivity) }
         awakeActivity = nil
         isLeaving = false
