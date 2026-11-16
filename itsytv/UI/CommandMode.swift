@@ -333,7 +333,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
     }
 
     func close() {
-        clapDetector.stop()
+        clapDetector.shutDown()
         if let awakeActivity { ProcessInfo.processInfo.endActivity(awakeActivity) }
         awakeActivity = nil
         isLeaving = false
