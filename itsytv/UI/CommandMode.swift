@@ -122,7 +122,12 @@ final class CommandModeController {
         window.setFrame(screen.frame, display: true)
 
         NSApp.activate(ignoringOtherApps: true)
+        window.alphaValue = 0
         window.makeKeyAndOrderFront(nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            window.animator().alphaValue = 1
+        }
         self.window = window
 
         state.dimmed = false
@@ -198,6 +203,7 @@ struct CommandModeView: View {
     @State private var showingKeyboard = false
     @State private var keyboardText = ""
     @AppStorage("commandModeShowClock") private var showClock = true
+    @State private var morphed = false
     @AppStorage("commandModeRed") private var redOnBlack = false
 
     private var isConnected: Bool { manager.connectionStatus == .connected }
@@ -224,9 +230,11 @@ struct CommandModeView: View {
                             withAnimation(.easeInOut(duration: 0.25)) { showClock.toggle() }
                         }
                         HStack(alignment: .top) {
-                            Text(isConnected ? (manager.connectedDeviceName ?? "Apple TV") : "Reconnecting…")
-                                .font(.system(size: unit * 0.22, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.4))
+                            if !isConnected {
+                                Text("Reconnecting…")
+                                    .font(.system(size: unit * 0.22, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.4))
+                            }
                             Spacer()
                             glyphButton("xmark", size: unit * 0.7, action: onExit)
                                 .help("Leave command mode (⌘W)")
@@ -238,18 +246,27 @@ struct CommandModeView: View {
                     // Middle: square D-pad fills the left half, pill buttons fill the right half
                     HStack(spacing: unit * 0.6) {
                         GeometryReader { half in
+                            // Starts as the remote's round pad, then grows into the square.
+                            let round = min(half.size.width, half.size.height) * 0.62
+                            let full = min(half.size.width, half.size.height)
                             DPadView(
                                 onPress: { b, action in manager.pressButton(b, action: action) },
-                                size: half.size.width,
+                                size: morphed ? half.size.width : round,
                                 swipeEnabled: true,
-                                height: half.size.height
+                                height: morphed ? half.size.height : round,
+                                cornerRadius: morphed ? full * 0.12 : round / 2
                             )
+                            .frame(width: half.size.width, height: half.size.height)
                         }
 
                         GeometryReader { half in
                             // Three columns, three rows, sized to fill the half.
-                            let pillW = (half.size.width - gap * 2) / 3
-                            let pillH = (half.size.height - gap * 2) / 3
+                            // Starts as round buttons, then stretches into pills.
+                            let fullW = (half.size.width - gap * 2) / 3
+                            let fullH = (half.size.height - gap * 2) / 3
+                            let round = min(fullW, fullH) * 0.7
+                            let pillW = morphed ? fullW : round
+                            let pillH = morphed ? fullH : round
 
                             VStack(spacing: gap) {
                                 HStack(spacing: gap) {
@@ -276,13 +293,14 @@ struct CommandModeView: View {
                                     glyphButton("keyboard", size: pillH, width: pillW) { toggleKeyboard() }
                                 }
                                 VolumePill(
-                                    width: half.size.width,
+                                    width: morphed ? half.size.width : round * 3 + gap * 2,
                                     height: pillH,
                                     horizontal: true,
                                     onUp: { manager.pressButton(.volumeUp) },
                                     onDown: { manager.pressButton(.volumeDown) }
                                 )
                             }
+                            .frame(width: half.size.width, height: half.size.height)
                         }
                     }
                     .padding(.horizontal, unit * 0.4)
@@ -318,6 +336,10 @@ struct CommandModeView: View {
             }
         }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in toggleKeyboard() }
+        .onAppear {
+            // Morph from the remote's round controls into the square pad and pills.
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(0.25)) { morphed = true }
+        }
         .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
     }
 

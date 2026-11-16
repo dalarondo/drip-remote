@@ -1211,6 +1211,8 @@ struct DPadView: View {
     let swipeEnabled: Bool
     /// Command mode: a rounded rectangle `size` wide and this tall, for more touch area.
     var height: CGFloat? = nil
+    /// Command mode corner radius; animating it from half the size morphs a circle into the square.
+    var cornerRadius: CGFloat? = nil
     @Environment(\.oledControls) private var oled
     @State private var blinkOpacity: Double = 0
 
@@ -1229,16 +1231,24 @@ struct DPadView: View {
     private var padHeight: CGFloat { height ?? size }
 
     /// A circle normally; a rounded rectangle in command mode.
+    private var padRadius: CGFloat { cornerRadius ?? min(size, padHeight) * 0.12 }
+
     private var padShape: AnyShape {
-        oled ? AnyShape(RoundedRectangle(cornerRadius: min(size, padHeight) * 0.12, style: .continuous))
-             : AnyShape(Circle())
+        oled ? AnyShape(RoundedRectangle(cornerRadius: padRadius)) : AnyShape(Circle())
     }
 
     var body: some View {
         let selectSize = min(size, padHeight) * (oled ? 0.42 : 0.5)
 
         ZStack {
-            ControlBackground(shape: padShape)
+            // Concrete shapes (not AnyShape) so the corner radius animates.
+            Group {
+                if oled {
+                    ControlBackground(shape: RoundedRectangle(cornerRadius: padRadius))
+                } else {
+                    ControlBackground(shape: Circle())
+                }
+            }
                 .frame(width: size, height: padHeight)
 
             // Center select button — larger, subtly distinct from outer ring
