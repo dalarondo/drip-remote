@@ -158,84 +158,96 @@ struct CommandModeView: View {
     var body: some View {
         GeometryReader { geo in
             // One unit drives every size, so the panel scales with the display.
-            let unit = min(geo.size.height / 9.5, geo.size.width / 15)
-            let button = unit * 1.3
+            let unit = min(geo.size.height / 10.5, geo.size.width / 13)
             let gap = unit * 0.32
 
             ZStack {
                 Color.black
 
-                HStack(spacing: unit) {
-                    // Left: clock and now playing
-                    VStack(spacing: unit * 0.5) {
+                VStack(spacing: unit * 0.5) {
+                    // Top: time, with the device name and exit in the corners
+                    ZStack {
                         clock(unit: unit)
-                        NowPlayingBar()
+                        HStack(alignment: .top) {
+                            Text(isConnected ? (manager.connectedDeviceName ?? "Apple TV") : "Reconnecting…")
+                                .font(.system(size: unit * 0.22, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.4))
+                            Spacer()
+                            glyphButton("xmark", size: unit * 0.7, action: onExit)
+                                .help("Leave command mode (⌘W)")
+                        }
+                        .frame(maxHeight: .infinity, alignment: .top)
                     }
-                    .frame(width: unit * 4.4)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                    // Centre: D-pad / touch surface
-                    DPadView(
-                        onPress: { b, action in manager.pressButton(b, action: action) },
-                        size: unit * 4.8,
-                        swipeEnabled: true
-                    )
+                    // Middle: square D-pad fills the left half, pill buttons fill the right half
+                    HStack(spacing: unit * 0.6) {
+                        GeometryReader { half in
+                            DPadView(
+                                onPress: { b, action in manager.pressButton(b, action: action) },
+                                size: half.size.width,
+                                swipeEnabled: true,
+                                height: half.size.height
+                            )
+                        }
 
-                    // Right: buttons
-                    VStack(spacing: gap) {
-                        HStack(spacing: gap) {
-                            RemoteCircleButton(imageName: "btnBack", button: .menu, shortcut: .back, size: button) { action in
-                                if action == .hold {
-                                    manager.pressButton(.home)
-                                } else {
-                                    manager.pressButton(.menu, action: action)
+                        GeometryReader { half in
+                            // Three columns, three rows, sized to fill the half.
+                            let pillW = (half.size.width - gap * 2) / 3
+                            let pillH = (half.size.height - gap * 2) / 3
+
+                            VStack(spacing: gap) {
+                                HStack(spacing: gap) {
+                                    RemoteCircleButton(imageName: "btnBack", button: .menu, shortcut: .back, size: pillH, width: pillW) { action in
+                                        if action == .hold {
+                                            manager.pressButton(.home)
+                                        } else {
+                                            manager.pressButton(.menu, action: action)
+                                        }
+                                    }
+                                    RemoteCircleButton(imageName: "btnHome", button: .home, shortcut: .home, size: pillH, width: pillW) { action in
+                                        manager.pressButton(.home, action: action)
+                                    }
+                                    DictateButton(size: pillH, width: pillW)
                                 }
+                                HStack(spacing: gap) {
+                                    RemoteCircleButton(imageName: "btnPlayPause", button: .playPause, shortcut: .playPause, size: pillH, width: pillW) { action in
+                                        manager.pressButton(.playPause, action: action)
+                                    }
+                                    RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: pillH, width: pillW) { action in
+                                        guard action == .click else { return }
+                                        manager.toggleMute()
+                                    }
+                                    glyphButton("keyboard", size: pillH, width: pillW) { toggleKeyboard() }
+                                }
+                                VolumePill(
+                                    width: half.size.width,
+                                    height: pillH,
+                                    horizontal: true,
+                                    onUp: { manager.pressButton(.volumeUp) },
+                                    onDown: { manager.pressButton(.volumeDown) }
+                                )
                             }
-                            RemoteCircleButton(imageName: "btnHome", button: .home, shortcut: .home, size: button) { action in
-                                manager.pressButton(.home, action: action)
-                            }
-                            DictateButton(size: button)
                         }
-                        HStack(spacing: gap) {
-                            RemoteCircleButton(imageName: "btnPlayPause", button: .playPause, shortcut: .playPause, size: button) { action in
-                                manager.pressButton(.playPause, action: action)
-                            }
-                            RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: button) { action in
-                                guard action == .click else { return }
-                                manager.toggleMute()
-                            }
-                            glyphButton("keyboard", size: button) { toggleKeyboard() }
-                        }
-                        VolumePill(
-                            width: button * 3 + gap * 2,
-                            height: button * 0.8,
-                            horizontal: true,
-                            onUp: { manager.pressButton(.volumeUp) },
-                            onDown: { manager.pressButton(.volumeDown) }
-                        )
                     }
-                    .frame(width: unit * 4.4)
-                }
-                .opacity(isConnected ? 1 : 0.35)
-                .allowsHitTesting(isConnected)
+                    .padding(.horizontal, unit * 0.4)
+                    .frame(maxHeight: .infinity)
+                    .opacity(isConnected ? 1 : 0.35)
+                    .allowsHitTesting(isConnected)
 
-                // Corners: device name, exit
-                VStack {
-                    HStack {
-                        Text(isConnected ? (manager.connectedDeviceName ?? "Apple TV") : "Reconnecting…")
-                            .font(.system(size: unit * 0.22, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.4))
-                        Spacer()
-                        glyphButton("xmark", size: unit * 0.7, action: onExit)
-                            .help("Leave command mode (⌘W)")
-                    }
-                    Spacer()
+                    // Bottom: now playing, or the text field while typing / dictating
                     if showingKeyboard {
                         keyboardField(unit: unit)
+                            .padding(.bottom, unit * 0.5)
+                    } else {
+                        NowPlayingBar()
+                            .frame(width: min(geo.size.width * 0.6, unit * 8))
+                            .opacity(isConnected ? 1 : 0.35)
                     }
                 }
                 .padding(.horizontal, unit * 0.4)
                 .padding(.top, max(topInset, unit * 0.3))
-                .padding(.bottom, unit * 0.5)
+                .padding(.bottom, unit * 0.2)
             }
             .opacity(state.dimmed ? 0.3 : 1)
             .animation(.easeInOut(duration: state.dimmed ? 2 : 0.2), value: state.dimmed)
@@ -273,14 +285,14 @@ struct CommandModeView: View {
         }
     }
 
-    private func glyphButton(_ symbol: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+    private func glyphButton(_ symbol: String, size: CGFloat, width: CGFloat? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: size * 0.33, weight: .medium))
                 .foregroundStyle(.white.opacity(0.85))
-                .frame(width: size, height: size)
-                .background(ControlBackground(shape: Circle()))
-                .contentShape(Circle())
+                .frame(width: width ?? size, height: size)
+                .background(ControlBackground(shape: Capsule()))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
     }

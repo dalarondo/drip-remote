@@ -1094,8 +1094,9 @@ private final class DPadTouchSurfaceView: NSView {
     private func button(at point: CGPoint) -> CompanionButton {
         let dx = point.x - bounds.midX
         let dy = point.y - bounds.midY
-        if hypot(dx, dy) < bounds.width * 0.25 { return .select }
-        if abs(dx) > abs(dy) { return dx < 0 ? .left : .right }
+        if hypot(dx, dy) < min(bounds.width, bounds.height) * 0.25 { return .select }
+        // Compare as fractions of each half-extent, so a wide pad still splits on its diagonals.
+        if abs(dx) / max(bounds.width, 1) > abs(dy) / max(bounds.height, 1) { return dx < 0 ? .left : .right }
         return dy < 0 ? .up : .down
     }
 
@@ -1167,15 +1168,16 @@ extension Notification.Name {
 /// This is dictation, not Siri – the Apple TV only gets text.
 struct DictateButton: View {
     let size: CGFloat
+    var width: CGFloat? = nil
     @State private var blinkOpacity: Double = 0
 
     var body: some View {
         Image(systemName: "mic.fill")
             .font(.system(size: size * 0.33, weight: .medium))
             .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
-            .frame(width: size, height: size)
-            .background(ControlBackground(shape: Circle()))
-            .overlay(Circle().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
+            .frame(width: width ?? size, height: size)
+            .background(ControlBackground(shape: Capsule()))
+            .overlay(Capsule().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
             .overlay(RemoteButtonGesture { action in
                 guard action == .click else { return }
                 blinkOpacity = 0.25
@@ -1207,6 +1209,9 @@ struct DPadView: View {
     let onPress: (CompanionButton, InputAction) -> Void
     let size: CGFloat
     let swipeEnabled: Bool
+    /// Command mode: a rounded rectangle `size` wide and this tall, for more touch area.
+    var height: CGFloat? = nil
+    @Environment(\.oledControls) private var oled
     @State private var blinkOpacity: Double = 0
 
     private static let dpadButtons: Set<CompanionButton> = [.up, .down, .left, .right, .select]
@@ -1221,15 +1226,31 @@ struct DPadView: View {
         withAnimation(.easeOut(duration: 0.2)) { blinkOpacity = 0 }
     }
 
+    private var padHeight: CGFloat { height ?? size }
+
+    /// A circle normally; a rounded rectangle in command mode.
+    private var padShape: AnyShape {
+        oled ? AnyShape(RoundedRectangle(cornerRadius: min(size, padHeight) * 0.12, style: .continuous))
+             : AnyShape(Circle())
+    }
+
     var body: some View {
+        let selectSize = min(size, padHeight) * (oled ? 0.42 : 0.5)
+
         ZStack {
-            ControlBackground(shape: Circle())
-                .frame(width: size, height: size)
+            ControlBackground(shape: padShape)
+                .frame(width: size, height: padHeight)
 
             // Center select button — larger, subtly distinct from outer ring
-            Circle()
-                .fill(Color(nsColor: DS.Colors.remoteButtonForeground).opacity(0.08))
-                .frame(width: size * 0.5, height: size * 0.5)
+            Group {
+                if oled {
+                    Circle().stroke(Color.white.opacity(0.28), lineWidth: 1.5)
+                } else {
+                    Circle().fill(Color(nsColor: DS.Colors.remoteButtonForeground).opacity(0.08))
+                }
+            }
+                .frame(width: selectSize, height: selectSize)
+                .contentShape(Circle())
                 .overlay(Circle().fill(.white.opacity(manager.heldButton == .select ? 0.22 : 0)).allowsHitTesting(false))
                 .shortcutHint(.select)
                 .help("Return")
@@ -1240,7 +1261,7 @@ struct DPadView: View {
                 Spacer()
                 DPadDot(shortcut: .down)
             }
-            .frame(height: size)
+            .frame(height: padHeight)
             .padding(.vertical, 12)
 
             HStack {
@@ -1251,9 +1272,9 @@ struct DPadView: View {
             .frame(width: size)
             .padding(.horizontal, 12)
 
-            Circle()
+            padShape
                 .fill(.white.opacity(blinkOpacity))
-                .frame(width: size, height: size)
+                .frame(width: size, height: padHeight)
                 .allowsHitTesting(false)
         }
         // Tap / hold / drag anywhere on the pad (touch screen, mouse, trackpad click).
@@ -1264,7 +1285,7 @@ struct DPadView: View {
                 onSwipeChanged: { manager.touchMoved(translation: $0) },
                 onSwipeEnded: { manager.touchEnded(translation: $0, velocity: $1) }
             )
-            .clipShape(Circle())
+            .clipShape(padShape)
         )
         // Swipe over the pad (trackpad / Magic Mouse) streams as a touch,
         // matching iOS. Hit testing stays off so button clicks pass through.
@@ -1303,11 +1324,14 @@ struct RemoteCircleButton: View {
     let button: CompanionButton
     let shortcut: RemoteShortcut
     let size: CGFloat
+    /// Wider than `size` turns the circle into a pill (command mode).
+    let width: CGFloat?
     let action: (InputAction) -> Void
     @State private var blinkOpacity: Double = 0
 
-    init(imageName: String, button: CompanionButton, shortcut: RemoteShortcut, size: CGFloat,
+    init(imageName: String, button: CompanionButton, shortcut: RemoteShortcut, size: CGFloat, width: CGFloat? = nil,
          onInput action: @escaping (InputAction) -> Void) {
+        self.width = width
         self.imageName = imageName
         self.button = button
         self.shortcut = shortcut
@@ -1333,10 +1357,10 @@ struct RemoteCircleButton: View {
             .resizable()
             .scaledToFit()
             .frame(width: size * 0.33, height: size * 0.33)
-            .frame(width: size, height: size)
-            .background(ControlBackground(shape: Circle()))
-            .overlay(Circle().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
-            .overlay(Circle().fill(.white.opacity(isHeld ? 0.22 : 0)).allowsHitTesting(false))
+            .frame(width: width ?? size, height: size)
+            .background(ControlBackground(shape: Capsule()))
+            .overlay(Capsule().fill(.white.opacity(blinkOpacity)).allowsHitTesting(false))
+            .overlay(Capsule().fill(.white.opacity(isHeld ? 0.22 : 0)).allowsHitTesting(false))
             .scaleEffect(isHeld ? 0.94 : 1)
             .animation(.easeOut(duration: 0.1), value: isHeld)
             .overlay(RemoteButtonGesture { input in press(input) })
