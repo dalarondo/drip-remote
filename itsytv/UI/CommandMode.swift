@@ -74,11 +74,13 @@ final class CommandModeState {
     @ObservationIgnored var onTextEntryChange: (() -> Void)?
     /// The apps page is showing instead of the controls.
     var showingApps = false
+    /// The full-screen playback page is showing.
+    var showingPlayback = false
     /// Set when leaving, so the controls morph back to their round shapes first.
     var leaving = false
 }
 
-final class CommandModeController {
+final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
     private let manager: AppleTVManager
     private let iconLoader: AppIconLoader
     private(set) var window: NSWindow?
@@ -117,6 +119,7 @@ final class CommandModeController {
     init(manager: AppleTVManager, iconLoader: AppIconLoader) {
         self.manager = manager
         self.iconLoader = iconLoader
+        super.init()
     }
 
     /// The screen to take over: a touch display if there is one, else `preferred`.
@@ -155,6 +158,12 @@ final class CommandModeController {
         window.contentView = hosting
         // Lets us tell a finger from the pointer, to keep the cursor hidden for touch.
         TouchMode.shared.attachSniffer(to: hosting)
+        // Page swipes. Touches on a touch display reach gesture recognizers only – not
+        // event monitors – so the long swipe needs a recognizer, not just the monitor below.
+        let pan = NSPanGestureRecognizer(target: self, action: #selector(handlePagePan(_:)))
+        pan.delegate = self
+        pan.delaysPrimaryMouseButtonEvents = false
+        hosting.addGestureRecognizer(pan)
         window.setFrame(screen.frame, display: true)
 
         NSApp.activate(ignoringOtherApps: true)
@@ -183,6 +192,7 @@ final class CommandModeController {
         isLeaving = false
         state.leaving = false
         state.showingApps = false
+        state.showingPlayback = false
         awakeActivity = ProcessInfo.processInfo.beginActivity(
             options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
             reason: "Command mode control panel is on screen"
@@ -201,27 +211,55 @@ final class CommandModeController {
         NSCursor.setHiddenUntilMouseMoves(true)
     }
 
+    private func startsOnDPad(windowPoint: NSPoint) -> Bool {
+        guard let hit = window?.contentView?.hitTest(windowPoint) else { return false }
+        return String(describing: type(of: hit)).contains("DPadTouchSurface")
+    }
+
+    private func turnPage(dx: CGFloat, dy: CGFloat, width: CGFloat) {
+        guard abs(dx) > width * 0.25, abs(dy) < abs(dx) * 0.5, !state.showingPlayback else { return }
+        if dx < 0, !state.showingApps, !state.textEntryActive {
+            state.showingApps = true
+        } else if dx > 0, state.showingApps {
+            state.showingApps = false
+        }
+    }
+
+    @objc private func handlePagePan(_ pan: NSPanGestureRecognizer) {
+        guard pan.state == .ended, let view = pan.view else { return }
+        let t = pan.translation(in: view)
+        turnPage(dx: t.x, dy: t.y, width: view.bounds.width)
+    }
+
+    // Swipes that begin on the D-pad belong to the Apple TV, not to paging.
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldReceive touch: NSTouch) -> Bool {
+        !startsOnDPad(windowPoint: touch.location(in: nil))
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        !startsOnDPad(windowPoint: event.locationInWindow)
+    }
+
+    // Never block the controls' own gestures.
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: NSGestureRecognizer) -> Bool {
+        true
+    }
+
     /// A long, mostly horizontal swipe turns the page: left shows the apps, right goes back.
     /// Swipes that start on the D-pad are left alone – those belong to the Apple TV.
     private func trackPageSwipe(_ event: NSEvent) {
         guard let window, let content = window.contentView else { return }
         switch event.type {
         case .leftMouseDown:
-            let hit = content.hitTest(event.locationInWindow)
-            let onDPad = hit.map { String(describing: type(of: $0)).contains("DPadTouchSurface") } ?? false
-            swipeStart = onDPad ? nil : (event.locationInWindow, event.timestamp)
+            swipeStart = startsOnDPad(windowPoint: event.locationInWindow) ? nil : (event.locationInWindow, event.timestamp)
         case .leftMouseUp:
             guard let start = swipeStart else { return }
             swipeStart = nil
-            let dx = event.locationInWindow.x - start.point.x
-            let dy = event.locationInWindow.y - start.point.y
-            let long = abs(dx) > content.bounds.width * 0.3
-            guard long, abs(dy) < abs(dx) * 0.4, event.timestamp - start.time < 1.2 else { return }
-            if dx < 0, !state.showingApps, !state.textEntryActive {
-                state.showingApps = true
-            } else if dx > 0, state.showingApps {
-                state.showingApps = false
-            }
+            guard event.timestamp - start.time < 1.5 else { return }
+            turnPage(dx: event.locationInWindow.x - start.point.x,
+                     dy: event.locationInWindow.y - start.point.y,
+                     width: content.bounds.width)
         default:
             break
         }
@@ -455,9 +493,16 @@ struct CommandModeView: View {
                                 keyboardField(unit: unit)
                                     .padding(.bottom, unit * 0.5)
                             } else {
+                                // The dark space either side of the transport opens the playback page.
                                 NowPlayingBar()
                                     .frame(width: min(geo.size.width * 0.6, unit * 8))
                                     .opacity(isConnected ? 1 : 0.35)
+                                    .frame(maxWidth: .infinity)
+                                    .background(
+                                        Color.black
+                                            .contentShape(Rectangle())
+                                            .onTapGesture { state.showingPlayback = true }
+                                    )
                             }
                             }
                             .offset(x: state.showingApps ? -page.size.width * 1.1 : 0)
@@ -474,7 +519,15 @@ struct CommandModeView: View {
                 .padding(.horizontal, unit * 0.4)
                 .padding(.top, max(topInset, unit * 0.3))
                 .padding(.bottom, unit * 0.2)
+                .opacity(state.showingPlayback ? 0 : 1)
+                .allowsHitTesting(!state.showingPlayback)
+
+                if state.showingPlayback {
+                    playbackPage(unit: unit, width: geo.size.width)
+                        .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                }
             }
+            .animation(.spring(response: 0.4, dampingFraction: 0.88), value: state.showingPlayback)
             // Night colours: multiplying turns every white / grey pixel red and leaves black black.
             .colorMultiply(redOnBlack ? Color(red: 1, green: 0.12, blue: 0.08) : .white)
             .opacity(state.dimmed ? 0.3 : 1)
@@ -498,6 +551,90 @@ struct CommandModeView: View {
             guard leaving else { return }
             showingKeyboard = false
             withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { morphed = false }
+        }
+    }
+
+    /// Full-screen playback: big transport, skip buttons and a wide scrubber.
+    /// Tapping any dark space goes back to the controls.
+    private func playbackPage(unit: CGFloat, width: CGFloat) -> some View {
+        let mrp = manager.mrpManager
+        let np = mrp.nowPlaying
+        let duration = np?.duration ?? 0
+        // Nine buttons must fit the width: 6 skips + 3 transport ≈ 11.8 units of the 13 available.
+        let big = unit * 1.4
+        let skipW = unit * 1.1
+        let skipH = unit * 1.0
+
+        func skip(_ seconds: Double) {
+            guard let np, duration > 0 else { return }
+            mrp.seekToPosition(min(duration, max(0, np.currentPosition + seconds)))
+        }
+
+        func skipButton(_ seconds: Double) -> some View {
+            Button { skip(seconds) } label: {
+                Text("\(seconds < 0 ? "−" : "+")\(Int(abs(seconds)))")
+                    .font(.system(size: unit * 0.36, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: skipW, height: skipH)
+                    .background(ControlBackground(shape: Capsule()))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("\(seconds < 0 ? "Back" : "Forward") \(Int(abs(seconds))) seconds")
+        }
+
+        func transport(_ symbol: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+            Button(action: action) {
+                Image(systemName: symbol)
+                    .font(.system(size: size * 0.38, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: size, height: size)
+                    .background(ControlBackground(shape: Circle()))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+
+        return ZStack {
+            Color.black
+                .contentShape(Rectangle())
+                .onTapGesture { state.showingPlayback = false }
+
+            VStack(spacing: unit * 0.7) {
+                VStack(spacing: unit * 0.1) {
+                    Text(np?.title ?? " ")
+                        .font(.system(size: unit * 0.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                    Text(np.flatMap { [$0.artist, $0.album].compactMap { $0 }.joined(separator: " — ") } ?? " ")
+                        .font(.system(size: unit * 0.28))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+                }
+                .allowsHitTesting(false)
+
+                HStack(spacing: unit * 0.22) {
+                    skipButton(-30)
+                    skipButton(-20)
+                    skipButton(-10)
+                    transport("backward.fill", size: unit * 1.0) { mrp.sendCommand(.previousTrack) }
+                    transport(np?.isPlaying == true ? "pause.fill" : "play.fill", size: big) {
+                        manager.pressButton(.playPause)
+                    }
+                    transport("forward.fill", size: unit * 1.0) { mrp.sendCommand(.nextTrack) }
+                    skipButton(10)
+                    skipButton(20)
+                    skipButton(30)
+                }
+
+                NowPlayingProgress(
+                    nowPlaying: np,
+                    duration: duration,
+                    onSeek: { mrp.seekToPosition($0) }
+                )
+                .frame(width: width * 0.8)
+                .opacity(duration > 0 ? 1 : 0.3)
+            }
         }
     }
 
