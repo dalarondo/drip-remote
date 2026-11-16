@@ -560,11 +560,11 @@ struct CommandModeView: View {
         let mrp = manager.mrpManager
         let np = mrp.nowPlaying
         let duration = np?.duration ?? 0
-        // Nine buttons must fit the width: 6 skips + 3 transport ≈ 11.8 units of the 13 available.
-        let big = unit * 1.4
-        let skipW = unit * 1.1
-        let skipH = unit * 1.0
-
+        // Big targets, two rows. Row widths are in units; 13 units fit the screen.
+        let rowGap = unit * 0.28
+        let skipW = unit * 1.85
+        let skipH = unit * 1.5
+        let transportH = unit * 1.7
         func skip(_ seconds: Double) {
             guard let np, duration > 0 else { return }
             mrp.seekToPosition(min(duration, max(0, np.currentPosition + seconds)))
@@ -573,7 +573,7 @@ struct CommandModeView: View {
         func skipButton(_ seconds: Double) -> some View {
             Button { skip(seconds) } label: {
                 Text("\(seconds < 0 ? "−" : "+")\(Int(abs(seconds)))")
-                    .font(.system(size: unit * 0.36, weight: .medium, design: .rounded))
+                    .font(.system(size: unit * 0.5, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.85))
                     .frame(width: skipW, height: skipH)
                     .background(ControlBackground(shape: Capsule()))
@@ -583,14 +583,14 @@ struct CommandModeView: View {
             .help("\(seconds < 0 ? "Back" : "Forward") \(Int(abs(seconds))) seconds")
         }
 
-        func transport(_ symbol: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+        func transport(_ symbol: String, width: CGFloat, action: @escaping () -> Void) -> some View {
             Button(action: action) {
                 Image(systemName: symbol)
-                    .font(.system(size: size * 0.38, weight: .medium))
+                    .font(.system(size: transportH * 0.4, weight: .medium))
                     .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: size, height: size)
-                    .background(ControlBackground(shape: Circle()))
-                    .contentShape(Circle())
+                    .frame(width: width, height: transportH)
+                    .background(ControlBackground(shape: Capsule()))
+                    .contentShape(Capsule())
             }
             .buttonStyle(.plain)
         }
@@ -600,7 +600,7 @@ struct CommandModeView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { state.showingPlayback = false }
 
-            VStack(spacing: unit * 0.7) {
+            VStack(spacing: unit * 0.45) {
                 VStack(spacing: unit * 0.1) {
                     Text(np?.title ?? " ")
                         .font(.system(size: unit * 0.5, weight: .semibold))
@@ -613,15 +613,20 @@ struct CommandModeView: View {
                 }
                 .allowsHitTesting(false)
 
-                HStack(spacing: unit * 0.22) {
+                // Row 1: previous, play / pause, next
+                HStack(spacing: rowGap) {
+                    transport("backward.fill", width: unit * 3.2) { mrp.sendCommand(.previousTrack) }
+                    transport(np?.isPlaying == true ? "pause.fill" : "play.fill", width: unit * 4.6) {
+                        manager.pressButton(.playPause)
+                    }
+                    transport("forward.fill", width: unit * 3.2) { mrp.sendCommand(.nextTrack) }
+                }
+
+                // Row 2: skip back and forward
+                HStack(spacing: rowGap) {
                     skipButton(-30)
                     skipButton(-20)
                     skipButton(-10)
-                    transport("backward.fill", size: unit * 1.0) { mrp.sendCommand(.previousTrack) }
-                    transport(np?.isPlaying == true ? "pause.fill" : "play.fill", size: big) {
-                        manager.pressButton(.playPause)
-                    }
-                    transport("forward.fill", size: unit * 1.0) { mrp.sendCommand(.nextTrack) }
                     skipButton(10)
                     skipButton(20)
                     skipButton(30)
@@ -630,7 +635,8 @@ struct CommandModeView: View {
                 NowPlayingProgress(
                     nowPlaying: np,
                     duration: duration,
-                    onSeek: { mrp.seekToPosition($0) }
+                    onSeek: { mrp.seekToPosition($0) },
+                    grabDiameter: unit * 1.1
                 )
                 .frame(width: width * 0.8)
                 .opacity(duration > 0 ? 1 : 0.3)

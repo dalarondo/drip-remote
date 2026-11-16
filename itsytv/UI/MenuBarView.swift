@@ -350,11 +350,15 @@ struct NowPlayingProgress: View {
     @State private var pendingSeekTarget: TimeInterval?
     @State private var pendingSeekSince = Date.distantPast
 
+    /// A large, always-visible grab circle of this diameter (full-screen playback page).
+    var grabDiameter: CGFloat? = nil
+
     private var touch: Bool { TouchMode.shared.isTouch }
-    private var trackHeight: CGFloat { touch ? 8 : 4 }
-    private var activeTrackHeight: CGFloat { touch ? 18 : 12 }
-    private var thumbSize: CGFloat { touch ? 30 : 18 }
-    private var hitHeight: CGFloat { touch ? 64 : 40 }
+    private var trackHeight: CGFloat { grabDiameter.map { $0 * 0.16 } ?? (touch ? 8 : 4) }
+    private var activeTrackHeight: CGFloat { grabDiameter.map { $0 * 0.26 } ?? (touch ? 18 : 12) }
+    private var thumbSize: CGFloat { grabDiameter ?? (touch ? 30 : 18) }
+    private var hitHeight: CGFloat { grabDiameter.map { $0 + 28 } ?? (touch ? 64 : 40) }
+    private var thumbAlwaysVisible: Bool { grabDiameter != nil }
 
     enum ScrubSpeed: Equatable {
         case highSpeed, half, quarter, fine
@@ -420,8 +424,8 @@ struct NowPlayingProgress: View {
                             .frame(width: thumbSize, height: thumbSize)
                             .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
                             .offset(x: min(max(0, fillWidth - thumbSize / 2), geo.size.width - thumbSize))
-                            .opacity(isSeeking ? 1 : 0)
-                            .scaleEffect(isSeeking ? 1 : 0.4)
+                            .opacity(isSeeking || thumbAlwaysVisible ? 1 : 0)
+                            .scaleEffect(isSeeking ? (thumbAlwaysVisible ? 1.12 : 1) : (thumbAlwaysVisible ? 1 : 0.4))
                     }
                     .frame(width: geo.size.width, height: geo.size.height)
                     .contentShape(Rectangle())
