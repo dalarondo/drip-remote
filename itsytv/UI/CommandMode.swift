@@ -55,6 +55,8 @@ final class CommandModeState {
         didSet { if textEntryActive != oldValue { onTextEntryChange?() } }
     }
     @ObservationIgnored var onTextEntryChange: (() -> Void)?
+    /// Set when leaving, so the controls morph back to their round shapes first.
+    var leaving = false
 }
 
 final class CommandModeController {
@@ -76,6 +78,15 @@ final class CommandModeController {
 
     private let cursorHideDelay: TimeInterval = 3
     private var cursorTimer: Timer?
+
+    /// Above everything, including notification banners, so no alert shows over the panel.
+    private static let shieldLevel = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+    /// Just above the menu bar and Dock; used while typing so the dictation / input UI can show.
+    private static let typingLevel = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
+
+    /// Keeps the display (and so the Mac) awake while command mode is up.
+    private var awakeActivity: NSObjectProtocol?
+    private var isLeaving = false
 
     /// Called when the user leaves command mode from inside it.
     var onExit: (() -> Void)?
@@ -106,8 +117,7 @@ final class CommandModeController {
         window.isOpaque = true
         window.hasShadow = false
         window.isReleasedWhenClosed = false
-        // Above the menu bar and Dock, so nothing but black surrounds the controls.
-        window.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
+        window.level = Self.shieldLevel
         window.collectionBehavior = [.fullScreenAuxiliary, .canJoinAllSpaces, .stationary]
         window.appearance = NSAppearance(named: .darkAqua)
         window.acceptsMouseMovedEvents = true
@@ -148,8 +158,20 @@ final class CommandModeController {
         }
         noteActivity()
 
+        isLeaving = false
+        state.leaving = false
+        awakeActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
+            reason: "Command mode control panel is on screen"
+        )
+
         state.textEntryActive = false
-        state.onTextEntryChange = { [weak self] in self?.updateKeyboardBacklight() }
+        state.onTextEntryChange = { [weak self] in
+            guard let self else { return }
+            self.updateKeyboardBacklight()
+            // Drop below system input UI while typing; back to the shield level afterwards.
+            self.window?.level = self.state.textEntryActive ? Self.typingLevel : Self.shieldLevel
+        }
         keyRecentlyPressed = false
         updateKeyboardBacklight()
 
@@ -194,7 +216,27 @@ final class CommandModeController {
         }
     }
 
+    /// Leave with the reverse morph: controls shrink back to round, then the black fades out.
+    func animateOut(completion: @escaping () -> Void) {
+        guard let window, !isLeaving else { return }
+        isLeaving = true
+        state.dimmed = false
+        state.leaving = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.25
+                window.animator().alphaValue = 0
+            }, completionHandler: {
+                self?.close()
+                completion()
+            })
+        }
+    }
+
     func close() {
+        if let awakeActivity { ProcessInfo.processInfo.endActivity(awakeActivity) }
+        awakeActivity = nil
+        isLeaving = false
         cursorTimer?.invalidate()
         cursorTimer = nil
         NSCursor.setHiddenUntilMouseMoves(false)
@@ -368,6 +410,11 @@ struct CommandModeView: View {
             withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(0.25)) { morphed = true }
         }
         .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
+        .onChange(of: state.leaving) { _, leaving in
+            guard leaving else { return }
+            showingKeyboard = false
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { morphed = false }
+        }
     }
 
     private func toggleKeyboard() {

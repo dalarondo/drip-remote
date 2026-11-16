@@ -677,11 +677,12 @@ final class AppController: NSObject, NSMenuDelegate {
     private func exitCommandMode() {
         guard commandMode.isActive else { return }
         releaseHeldKey(reason: "command mode")
-        commandMode.close()
-        TouchMode.shared.commandModeActive = false
-        if let panel {
-            NSApp.activate(ignoringOtherApps: true)
-            panel.makeKeyAndOrderFront(nil)
+        commandMode.animateOut { [weak self] in
+            TouchMode.shared.commandModeActive = false
+            if let panel = self?.panel {
+                NSApp.activate(ignoringOtherApps: true)
+                panel.makeKeyAndOrderFront(nil)
+            }
         }
     }
 
