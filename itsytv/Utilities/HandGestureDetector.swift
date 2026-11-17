@@ -26,8 +26,8 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private let cooldown: TimeInterval = 2.0
     private let minConfidence: Float = 0.2
     // Waves: the raised hand must travel this many shoulder-widths sideways, this fast.
-    private let waveTravel: CGFloat = 0.9
-    private let waveWindow: TimeInterval = 0.7
+    private let waveTravel: CGFloat = 0.6
+    private let waveWindow: TimeInterval = 0.9
 
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "com.itsytv.gesture")
@@ -51,6 +51,7 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private var lastFrame: TimeInterval = 0
     private var current: Gesture?
     private var heldSince: TimeInterval = 0
+    private var holdAnchor: CGPoint = .zero
     private var lastSeen: TimeInterval = 0
     private var lastFire: TimeInterval = -10
     /// After firing, the hand must go away before the same gesture can fire again.
@@ -144,7 +145,7 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         var failure: String?
         do { try handler.perform([request]) } catch { failure = "hand: \(error.localizedDescription)" }
         var hands = request.results?.count ?? 0
-        var seen = (request.results ?? []).compactMap { classify($0, scaleX: width, scaleY: height) }.first
+        var seen = (request.results ?? []).compactMap { classify($0, scaleX: width, scaleY: height, origin: .zero) }.first
 
         // 2. At a distance: find the body, then look for a hand in a close crop around each wrist.
         do { try handler.perform([bodyRequest]) } catch { failure = "body: \(error.localizedDescription)" }
@@ -191,14 +192,14 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
                                                   width: roiPx.width / width, height: roiPx.height / height)
                 try? handler.perform([request])
                 hands += request.results?.count ?? 0
-                seen = (request.results ?? []).compactMap { classify($0, scaleX: roiPx.width, scaleY: roiPx.height) }.first
+                seen = (request.results ?? []).compactMap { classify($0, scaleX: roiPx.width, scaleY: roiPx.height, origin: roiPx.origin) }.first
             }
         }
 
         if now - lastDiagnostic > 3 {
             lastDiagnostic = now
             let joints = (try? body?.recognizedPoints(.all))?.values.filter { $0.confidence >= self.minConfidence }.count ?? 0
-            log.notice("seeing: \(Int(width))x\(Int(height)) brightness \(Self.brightness(pixels), format: .fixed(precision: 2)) people \(bodies.count) joints \(joints) hands \(hands) shape \(seen?.rawValue ?? "none", privacy: .public) error \(failure ?? "none", privacy: .public)")
+            log.notice("seeing: \(Int(width))x\(Int(height)) brightness \(Self.brightness(pixels), format: .fixed(precision: 2)) people \(bodies.count) joints \(joints) hands \(hands) shape \(seen?.gesture.rawValue ?? "none", privacy: .public) error \(failure ?? "none", privacy: .public)")
         }
 
         if let wave, now - lastFire > cooldown {
@@ -242,18 +243,23 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         return dx > 0 ? .waveLeft : .waveRight
     }
 
-    private func update(seen: Gesture?, now: TimeInterval) {
+    private func update(seen: Shape?, now: TimeInterval) {
         if let seen {
-            if seen != current {
-                current = seen
+            // A held shape must stay still. An open hand sweeping sideways is a wave,
+            // not a palm – so if the hand drifts more than its own size, the hold restarts.
+            let moved = hypot(seen.position.x - holdAnchor.x, seen.position.y - holdAnchor.y) > seen.size * 1.0
+            if seen.gesture != current || moved {
+                current = seen.gesture
                 heldSince = now
+                holdAnchor = seen.position
             }
             lastSeen = now
             if armed, now - heldSince >= holdTime, now - lastFire > cooldown {
                 armed = false
                 lastFire = now
-                log.notice("gesture: \(seen.rawValue, privacy: .public)")
-                DispatchQueue.main.async { [weak self] in self?.onGesture?(seen) }
+                log.notice("gesture: \(seen.gesture.rawValue, privacy: .public)")
+                let gesture = seen.gesture
+                DispatchQueue.main.async { [weak self] in self?.onGesture?(gesture) }
             }
         } else if now - lastSeen > dropTolerance {
             // The hand went away (or changed to no recognised shape): reset and re-arm.
@@ -264,9 +270,17 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
 
     // MARK: - Hand shape
 
+    /// A recognised hand shape, with where the hand is (pixels) and how big, so a hold
+    /// can require the hand to stay put.
+    private struct Shape {
+        let gesture: Gesture
+        let position: CGPoint
+        let size: CGFloat
+    }
+
     /// `scaleX` / `scaleY` are the pixel size of the region the hand was detected in, so
     /// distances are measured in pixels (Vision's 0–1 coordinates stretch x and y differently).
-    private func classify(_ hand: VNHumanHandPoseObservation, scaleX: CGFloat, scaleY: CGFloat) -> Gesture? {
+    private func classify(_ hand: VNHumanHandPoseObservation, scaleX: CGFloat, scaleY: CGFloat, origin: CGPoint) -> Shape? {
         guard let points = try? hand.recognizedPoints(.all) else { return nil }
         func p(_ name: VNHumanHandPoseObservation.JointName) -> CGPoint? {
             guard let point = points[name], point.confidence >= minConfidence else { return nil }
@@ -297,7 +311,7 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         // Open palm, raised: every finger extended, fingertips well above the wrist.
         if fingers.allSatisfy({ extended($0.0, $0.1) }), thumbOut,
            middleTip.y - wrist.y > size * 1.0 {
-            return .palm
+            return Shape(gesture: .palm, position: CGPoint(x: origin.x + wrist.x, y: origin.y + wrist.y), size: size)
         }
 
         // Thumbs-up: four fingers curled, thumb extended and pointing up, above the knuckles.
@@ -305,7 +319,7 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         if fingers.allSatisfy({ curled($0.0, $0.1) }), thumbOut,
            thumbVector.y > abs(thumbVector.x), thumbVector.y > size * 0.5,
            thumbTip.y > indexMCP.y, thumbTip.y > indexTip.y {
-            return .thumbsUp
+            return Shape(gesture: .thumbsUp, position: CGPoint(x: origin.x + wrist.x, y: origin.y + wrist.y), size: size)
         }
         return nil
     }
