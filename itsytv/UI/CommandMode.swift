@@ -71,6 +71,10 @@ struct IslandReveal: Shape {
     /// expanded card when it is open. Flat on top, rounded below.
     let source: CGRect
     let sourceRadius: CGFloat
+    /// False while the real island widget is still on screen underneath: the drip then
+    /// only draws the drop coming out of it, and the widget keeps showing its own content
+    /// until the flood covers it. True when there is no widget to show (first connect, exit).
+    var includeSource = true
     var progress: CGFloat
 
     var animatableData: CGFloat {
@@ -117,11 +121,12 @@ struct IslandReveal: Shape {
 
         var path = Path()
         // The source is always part of the shape, so the drip is one piece with the island.
-        Self.addSource(&path, in: source, radius: sourceRadius)
+        if includeSource { Self.addSource(&path, in: source, radius: sourceRadius) }
         guard p > 0 else { return path }
 
         let cx = source.midX
-        let dropRadius: CGFloat = 70
+        // In proportion to what it falls from: a bigger drop from the open card than from the pill.
+        let dropRadius = min(130, max(70, source.width * 0.28))
         let hangY = source.maxY + dropRadius * 1.25                    // where the drop hangs before letting go
         let landY = max(rect.height * 0.5, hangY + dropRadius * 1.5)   // where it lands
 
@@ -141,9 +146,13 @@ struct IslandReveal: Shape {
             let rx = radius * (1 + 0.10 * wobble), ry = radius * (1 - 0.10 * wobble)
             let sway = sin(t * .pi * 3) * 2.5 * e
             let centreY = lerp(source.maxY - 6, hangY, e) + wobble * 3 * e
-            let neckTop = source.maxY - 4
-            let topHalf = min(source.width * 0.4, lerp(radius * 0.9, dropRadius * 0.3, e))   // neck width at the source
-            let pinch = lerp(topHalf, 5, e)                                  // …and at its thinnest
+            // The neck is a funnel: it starts as wide as the source's flat bottom edge, so the
+            // drop flows out of the whole edge rather than dangling from a stem, and narrows
+            // as the drop sinks.
+            let neckTop = source.maxY - 2
+            let edgeHalf = max(dropRadius * 0.5, source.width / 2 - sourceRadius)
+            let topHalf = lerp(min(edgeHalf, dropRadius * 1.5), dropRadius * 0.4, e)
+            let pinch = lerp(topHalf, max(6, dropRadius * 0.14), e)          // …and at its thinnest
             let midY = (neckTop + centreY) / 2
             // Clockwise (right side down, left side up), matching every other piece.
             path.move(to: CGPoint(x: cx + topHalf, y: neckTop))
@@ -242,6 +251,7 @@ final class CommandModeState {
     /// The island widget's outline that the drip comes out of / returns to.
     var dripSource = CGRect(x: 0, y: 0, width: 187, height: 40)
     var dripSourceRadius: CGFloat = 20
+    var dripIncludesSource = true
     /// Controls are shown (false = plain black, while the drop is forming or retreating).
     var contentVisible = false
     /// The apps page is showing instead of the controls.
@@ -323,7 +333,9 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
 
     /// `fromExpandedIsland`: the drip button was pressed on the open island widget, so
     /// the drip comes out of the bottom of that card rather than the closed pill.
-    func show(preferredScreen: NSScreen?, fromExpandedIsland: Bool = false) {
+    /// `widgetOnScreen`: the island widget is still visible underneath, so the drip draws
+    /// only the drop and leaves the widget's own picture showing until the flood covers it.
+    func show(preferredScreen: NSScreen?, fromExpandedIsland: Bool = false, widgetOnScreen: Bool = false) {
         guard window == nil, let screen = targetScreen(preferred: preferredScreen) else { return }
 
         let window = CommandModeWindow(
@@ -368,6 +380,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         let source = Self.widgetRect(on: screen, expanded: fromExpandedIsland)
         state.dripSource = source.rect
         state.dripSourceRadius = source.radius
+        state.dripIncludesSource = !widgetOnScreen
         state.contentVisible = false
 
         NSApp.activate(ignoringOtherApps: true)
@@ -542,6 +555,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
             let source = Self.widgetRect(on: screen, expanded: false)
             state.dripSource = source.rect
             state.dripSourceRadius = source.radius
+            state.dripIncludesSource = true
         }
         // Controls morph back to round and fade to black, then the panel retreats into the island.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -793,6 +807,7 @@ struct CommandModeView: View {
         .overlay(Color.black.opacity(state.contentVisible ? 0 : 1).allowsHitTesting(false))
         .animation(.easeInOut(duration: state.contentVisible ? 0.6 : 0.25), value: state.contentVisible)
         .clipShape(IslandReveal(source: state.dripSource, sourceRadius: state.dripSourceRadius,
+                                includeSource: state.dripIncludesSource,
                                 progress: state.revealed ? 1 : 0))
         // Linear: the drip's own phases do the easing. Faster on the way back in.
         .animation(.linear(duration: state.revealed ? 2.4 : 1.0), value: state.revealed)

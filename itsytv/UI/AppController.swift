@@ -23,6 +23,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private var commandModeObserver: NSObjectProtocol?
     /// What command center retracts into: a Live Activity-style pill around the island.
     private lazy var islandWidget = IslandWidgetController(manager: manager)
+    private var islandHideToken = 0
     /// Touch layout: the panel is snapped to the right screen edge.
     private var isDocked = false
     private var isRedocking = false
@@ -728,10 +729,18 @@ final class AppController: NSObject, NSMenuDelegate {
         panel?.orderOut(nil)
         islandWidget.remoteIsOpen = false
         // Drip out of whatever the island looks like right now: open card or closed pill.
-        let fromExpanded = islandWidget.isVisible && islandWidget.isExpanded
-        islandWidget.hide()
+        let widgetOnScreen = islandWidget.isVisible
+        let fromExpanded = widgetOnScreen && islandWidget.isExpanded
+        // Leave the widget up while the drop forms and falls, so it keeps showing its own
+        // content; take it down once the flood has covered it.
+        islandHideToken += 1
+        let token = islandHideToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.7) { [weak self] in
+            guard let self, self.islandHideToken == token, self.commandMode.isActive else { return }
+            self.islandWidget.hide()
+        }
         TouchMode.shared.commandModeActive = true
-        commandMode.show(preferredScreen: screen, fromExpandedIsland: fromExpanded)
+        commandMode.show(preferredScreen: screen, fromExpandedIsland: fromExpanded, widgetOnScreen: widgetOnScreen)
     }
 
     @objc private func handlePanelPinch(_ pinch: NSMagnificationGestureRecognizer) {
@@ -742,6 +751,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private func exitCommandMode() {
         guard commandMode.isActive else { return }
         releaseHeldKey(reason: "command mode")
+        islandHideToken += 1        // cancel a pending "hide the widget" from the drip in
+        islandWidget.hide()
         commandMode.animateOut { [weak self] in
             guard let self else { return }
             TouchMode.shared.commandModeActive = false
