@@ -62,7 +62,8 @@ struct ControlBackground<S: Shape>: View {
 ///    by a thinning neck.
 /// 2. **Fall** (0.35 – 0.55): the drop lets go and falls, speeding up, to the middle of
 ///    the screen while the neck snaps back into the island.
-/// 3. **Flood** (0.55 – 1): where it lands, it spreads outward until it covers the screen.
+/// 3. **Splash and flood** (0.55 – 1): it lands squashed, throws up droplets, and spreads
+///    outward with a rippling edge until it covers the screen.
 ///
 /// Run backwards, the black gathers into a drop and is drawn back up into the island.
 struct IslandReveal: Shape {
@@ -97,37 +98,75 @@ struct IslandReveal: Shape {
 
         if p < Self.swellEnd {
             // 1. Swell: the drop grows and sinks, joined to the island by a pinching neck.
-            let e = easeOut(p / Self.swellEnd)
+            //    It wobbles as it hangs – breathing wide / tall and swaying slightly.
+            let t = p / Self.swellEnd
+            let e = easeOut(t)
+            let wobble = sin(t * .pi * 5) * (1 - t * 0.4)
             let radius = lerp(island.height * 0.4, dropRadius, e)
-            let centreY = lerp(island.midY, hangY, e)
+            let rx = radius * (1 + 0.10 * wobble), ry = radius * (1 - 0.10 * wobble)
+            let sway = sin(t * .pi * 3) * 2.5 * e
+            let centreY = lerp(island.midY, hangY, e) + wobble * 3 * e
             let topHalf = lerp(island.width * 0.45, island.width * 0.2, e)   // neck width at the island
             let pinch = lerp(topHalf, 5, e)                                  // …and at its thinnest
             let midY = (island.midY + centreY) / 2
             path.move(to: CGPoint(x: cx - topHalf, y: island.midY))
-            path.addQuadCurve(to: CGPoint(x: cx - radius * 0.7, y: centreY), control: CGPoint(x: cx - pinch, y: midY))
-            path.addLine(to: CGPoint(x: cx + radius * 0.7, y: centreY))
-            path.addQuadCurve(to: CGPoint(x: cx + topHalf, y: island.midY), control: CGPoint(x: cx + pinch, y: midY))
+            path.addQuadCurve(to: CGPoint(x: cx + sway - rx * 0.7, y: centreY), control: CGPoint(x: cx + sway * 0.5 - pinch, y: midY))
+            path.addLine(to: CGPoint(x: cx + sway + rx * 0.7, y: centreY))
+            path.addQuadCurve(to: CGPoint(x: cx + topHalf, y: island.midY), control: CGPoint(x: cx + sway * 0.5 + pinch, y: midY))
             path.closeSubpath()
-            path.addEllipse(in: CGRect(x: cx - radius, y: centreY - radius, width: radius * 2, height: radius * 2))
+            path.addEllipse(in: CGRect(x: cx + sway - rx, y: centreY - ry, width: rx * 2, height: ry * 2))
         } else if p < Self.fallEnd {
             // 2. Fall: gravity (t²), with the drop stretching a little as it speeds up.
             let t = (p - Self.swellEnd) / (Self.fallEnd - Self.swellEnd)
             let centreY = lerp(hangY, landY, t * t)
-            let stretch = 1 + 0.45 * sin(.pi * t)
+            let stretch = 1 + 0.5 * t
             let w = dropRadius / sqrt(stretch), h = dropRadius * stretch
             path.addEllipse(in: CGRect(x: cx - w, y: centreY - h, width: w * 2, height: h * 2))
-            // What's left of the neck snaps back up into the island.
-            let stub = lerp(dropRadius * 0.9, 0, min(1, t * 2.5))
+            // What's left of the neck snaps back up into the island, with a little bounce.
+            let snap = min(1, t * 2.2)
+            let stub = lerp(dropRadius * 0.9, 0, snap) * (1 + 0.3 * sin(snap * .pi * 3))
             if stub > 0.5 {
                 path.addEllipse(in: CGRect(x: cx - island.width * 0.2, y: island.midY,
                                            width: island.width * 0.4, height: stub))
             }
         } else {
-            // 3. Flood: spread from the landing point until every corner is covered.
-            let e = easeInOut((p - Self.fallEnd) / (1 - Self.fallEnd))
+            // 3. Splash and flood.
+            let c = (p - Self.fallEnd) / (1 - Self.fallEnd)
+            let e = easeInOut(c)
             let reach = hypot(max(cx, rect.width - cx), max(landY, rect.height - landY)) + 8
             let radius = lerp(dropRadius, reach, e)
-            path.addEllipse(in: CGRect(x: cx - radius, y: landY - radius, width: radius * 2, height: radius * 2))
+
+            // The blob's edge ripples – big lobes right after impact, settling to a clean
+            // circle as it spreads – and it lands squashed flat before rounding out.
+            let ripple = 0.22 * pow(1 - c, 1.6)
+            let squash = lerp(0.5, 1, min(1, c * 5))
+            let spin = c * 2.2
+            let steps = 96
+            for i in 0...steps {
+                let angle = CGFloat(i) / CGFloat(steps) * 2 * .pi
+                let r = radius * (1 + ripple * sin(7 * angle + spin) + ripple * 0.5 * sin(11 * angle - spin * 1.7))
+                let point = CGPoint(x: cx + cos(angle) * r, y: landY + sin(angle) * r * squash)
+                if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+            path.closeSubpath()
+
+            // Droplets thrown up and out by the impact, falling back under gravity and
+            // shrinking away (the flood overtakes most of them).
+            let life = min(1, c / 0.55)
+            if life < 1 {
+                let count = 9
+                for i in 0..<count {
+                    let f = CGFloat(i) / CGFloat(count - 1)
+                    let angle = lerp(-.pi * 0.92, -.pi * 0.08, f)               // an upward fan
+                    let speed = rect.height * (0.55 + 0.25 * sin(CGFloat(i) * 2.4))
+                    let x = cx + cos(angle) * speed * life
+                    let y = landY + sin(angle) * speed * life + rect.height * 0.55 * life * life
+                    let size = (7 + 5 * abs(sin(CGFloat(i) * 1.7))) * (1 - life)
+                    if size > 0.5 {
+                        path.addEllipse(in: CGRect(x: x - size, y: y - size, width: size * 2, height: size * 2))
+                    }
+                }
+            }
         }
         return path
     }
@@ -671,7 +710,7 @@ struct CommandModeView: View {
         }
         .clipShape(IslandReveal(island: island, progress: state.revealed ? 1 : 0))
         // Linear: the drip's own phases do the easing. Faster on the way back in.
-        .animation(.linear(duration: state.revealed ? 1.25 : 0.8), value: state.revealed)
+        .animation(.linear(duration: state.revealed ? 1.5 : 0.8), value: state.revealed)
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .onChange(of: manager.connectionStatus) { _, status in
@@ -690,7 +729,7 @@ struct CommandModeView: View {
         .onChange(of: manager.keyboardToggleCounter) { _, _ in toggleKeyboard() }
         .onAppear {
             // Morph from the remote's round controls into the square pad and pills.
-            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(1.1)) { morphed = true }
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(1.3)) { morphed = true }
         }
         .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
         .onChange(of: state.leaving) { _, leaving in
