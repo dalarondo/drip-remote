@@ -41,9 +41,10 @@ final class AppController: NSObject, NSMenuDelegate {
         commandMode.onExit = { [weak self] in self?.exitCommandMode() }
         islandWidget.onDrip = { [weak self] in self?.enterCommandMode() }
         islandWidget.onRemote = { [weak self] in
-            guard let panel = self?.panel else { return }
+            guard let self, let panel = self.panel else { return }
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
+            if TouchMode.shared.isTouch { self.applyPanelLayout(animated: false) }
         }
         commandModeObserver = NotificationCenter.default.addObserver(
             forName: .toggleCommandMode, object: nil, queue: .main
@@ -600,6 +601,12 @@ final class AppController: NSObject, NSMenuDelegate {
         panel.delegate = self
         panel.hasShadow = true
 
+        // Command center is the main show: when opening into it, the small remote is
+        // created invisibly (it still needs ordering once so its position is set) and
+        // only appears when asked for with the island widget's remote button.
+        let opensInCommandCenter = UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true
+        if opensInCommandCenter { panel.alphaValue = 0 }
+
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
 
@@ -638,8 +645,9 @@ final class AppController: NSObject, NSMenuDelegate {
         vibrancy.addGestureRecognizer(pinch)
 
         // Command center is the primary interface: open straight into it.
-        if UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true {
-            enterCommandMode()
+        if opensInCommandCenter {
+            enterCommandMode()      // orders the remote out
+            panel.alphaValue = 1
         }
 
         // Observe "Always on top" toggle changes while panel is open
@@ -668,6 +676,13 @@ final class AppController: NSObject, NSMenuDelegate {
     /// Show the already-open remote on the current desktop, in front.
     private func bringPanelHere() {
         guard let panel else { return }
+        // Already connected: the menu bar icon / hotkey leads to command center, not the
+        // small remote, unless the remote is what's currently on screen.
+        if commandMode.isActive { return }
+        if !panel.isVisible, islandWidget.isVisible {
+            enterCommandMode()
+            return
+        }
         if !panel.isOnActiveSpace || !panel.isVisible {
             log.error("bringPanelHere: panel was off this desktop (onActiveSpace=\(panel.isOnActiveSpace, privacy: .public) visible=\(panel.isVisible, privacy: .public))")
         }
