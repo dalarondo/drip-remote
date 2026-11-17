@@ -78,13 +78,42 @@ struct IslandReveal: Shape {
     private static let swellEnd: CGFloat = 0.32
     private static let fallEnd: CGFloat = 0.45
 
+    // Every piece of the shape is drawn in the same direction (clockwise on screen).
+    // With mixed directions, the default winding rule cancels where two pieces overlap
+    // and punches a see-through hole – e.g. where the drop meets the island.
+    private static func addOval(_ path: inout Path, in r: CGRect) {
+        let steps = 40
+        for i in 0..<steps {
+            let a = CGFloat(i) / CGFloat(steps) * 2 * .pi
+            let point = CGPoint(x: r.midX + cos(a) * r.width / 2, y: r.midY + sin(a) * r.height / 2)
+            if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        path.closeSubpath()
+    }
+
+    private static func addCapsule(_ path: inout Path, in r: CGRect) {
+        let radius = min(r.width, r.height) / 2
+        let steps = 16
+        // Right end cap (top → bottom), then left end cap (bottom → top).
+        for i in 0...steps {
+            let a = -CGFloat.pi / 2 + CGFloat(i) / CGFloat(steps) * .pi
+            let point = CGPoint(x: r.maxX - radius + cos(a) * radius, y: r.midY + sin(a) * radius)
+            if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        for i in 0...steps {
+            let a = CGFloat.pi / 2 + CGFloat(i) / CGFloat(steps) * .pi
+            path.addLine(to: CGPoint(x: r.minX + radius + cos(a) * radius, y: r.midY + sin(a) * radius))
+        }
+        path.closeSubpath()
+    }
+
     func path(in rect: CGRect) -> Path {
         let p = min(1, max(0, progress))
         if p >= 0.999 { return Path(rect) }
 
         var path = Path()
         // The island itself is always part of the shape (black on black – invisible).
-        path.addRoundedRect(in: island, cornerSize: CGSize(width: island.height / 2, height: island.height / 2))
+        Self.addCapsule(&path, in: island)
         guard p > 0 else { return path }
 
         let cx = island.midX
@@ -109,24 +138,25 @@ struct IslandReveal: Shape {
             let topHalf = lerp(island.width * 0.45, island.width * 0.2, e)   // neck width at the island
             let pinch = lerp(topHalf, 5, e)                                  // …and at its thinnest
             let midY = (island.midY + centreY) / 2
-            path.move(to: CGPoint(x: cx - topHalf, y: island.midY))
-            path.addQuadCurve(to: CGPoint(x: cx + sway - rx * 0.7, y: centreY), control: CGPoint(x: cx + sway * 0.5 - pinch, y: midY))
-            path.addLine(to: CGPoint(x: cx + sway + rx * 0.7, y: centreY))
-            path.addQuadCurve(to: CGPoint(x: cx + topHalf, y: island.midY), control: CGPoint(x: cx + sway * 0.5 + pinch, y: midY))
+            // Clockwise (right side down, left side up), matching every other piece.
+            path.move(to: CGPoint(x: cx + topHalf, y: island.midY))
+            path.addQuadCurve(to: CGPoint(x: cx + sway + rx * 0.7, y: centreY), control: CGPoint(x: cx + sway * 0.5 + pinch, y: midY))
+            path.addLine(to: CGPoint(x: cx + sway - rx * 0.7, y: centreY))
+            path.addQuadCurve(to: CGPoint(x: cx - topHalf, y: island.midY), control: CGPoint(x: cx + sway * 0.5 - pinch, y: midY))
             path.closeSubpath()
-            path.addEllipse(in: CGRect(x: cx + sway - rx, y: centreY - ry, width: rx * 2, height: ry * 2))
+            Self.addOval(&path, in: CGRect(x: cx + sway - rx, y: centreY - ry, width: rx * 2, height: ry * 2))
         } else if p < Self.fallEnd {
             // 2. Fall: gravity (t²), with the drop stretching a little as it speeds up.
             let t = (p - Self.swellEnd) / (Self.fallEnd - Self.swellEnd)
             let centreY = lerp(hangY, landY, t * t)
             let stretch = 1 + 0.5 * t
             let w = dropRadius / sqrt(stretch), h = dropRadius * stretch
-            path.addEllipse(in: CGRect(x: cx - w, y: centreY - h, width: w * 2, height: h * 2))
+            Self.addOval(&path, in: CGRect(x: cx - w, y: centreY - h, width: w * 2, height: h * 2))
             // What's left of the neck snaps back up into the island, with a little bounce.
             let snap = min(1, t * 2.2)
             let stub = lerp(dropRadius * 0.9, 0, snap) * (1 + 0.3 * sin(snap * .pi * 3))
             if stub > 0.5 {
-                path.addEllipse(in: CGRect(x: cx - island.width * 0.2, y: island.midY,
+                Self.addOval(&path, in: CGRect(x: cx - island.width * 0.2, y: island.midY,
                                            width: island.width * 0.4, height: stub))
             }
         } else {
@@ -165,7 +195,7 @@ struct IslandReveal: Shape {
                     let y = landY + sin(angle) * speed * life + rect.height * 0.75 * life * life
                     let size = (fast ? 9 : 20) * (0.7 + 0.5 * abs(sin(CGFloat(i) * 1.7))) * (1 - life * life)
                     if size > 0.5 {
-                        path.addEllipse(in: CGRect(x: x - size, y: y - size, width: size * 2, height: size * 2))
+                        Self.addOval(&path, in: CGRect(x: x - size, y: y - size, width: size * 2, height: size * 2))
                     }
                 }
                 // The rebound: a column of liquid thrown straight back up from the impact,
@@ -174,9 +204,9 @@ struct IslandReveal: Shape {
                 let columnH = dropRadius * 3.2 * rise
                 let columnW = dropRadius * 0.55 * (1 - life * 0.5)
                 if columnH > 1 {
-                    path.addEllipse(in: CGRect(x: cx - columnW / 2, y: landY - columnH, width: columnW, height: columnH))
+                    Self.addOval(&path, in: CGRect(x: cx - columnW / 2, y: landY - columnH, width: columnW, height: columnH))
                     let bead = dropRadius * 0.3 * rise
-                    path.addEllipse(in: CGRect(x: cx - bead, y: landY - columnH - bead * 1.6, width: bead * 2, height: bead * 2))
+                    Self.addOval(&path, in: CGRect(x: cx - bead, y: landY - columnH - bead * 1.6, width: bead * 2, height: bead * 2))
                 }
             }
         }
