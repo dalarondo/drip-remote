@@ -833,6 +833,7 @@ struct CommandModeView: View {
             if focused {
                 state.showingApps = false
                 state.showingPlayback = false
+                keyboardText = manager.focusedFieldText     // carry on from what's already there
                 showingKeyboard = true
             } else if showingKeyboard {
                 toggleKeyboard()

@@ -202,6 +202,7 @@ struct RemoteControlView: View {
             guard !TouchMode.shared.commandModeActive, RemoteReveal.shared.revealed else { return }
             if focused {
                 selectedTab = .remote
+                keyboardText = manager.focusedFieldText     // carry on from what's already there
                 showingKeyboard = true
             } else if showingKeyboard {
                 showingKeyboard = false
