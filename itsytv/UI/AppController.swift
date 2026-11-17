@@ -382,12 +382,6 @@ final class AppController: NSObject, NSMenuDelegate {
             menu.addItem(createCheckboxItem(title: "Show in Dock", isOn: DockIcon.isOn) {
                 DockIcon.set(!DockIcon.isOn)
             })
-            #if !APPSTORE
-            let updateItem = createActionItem(title: "Check for updates...", symbolName: "arrow.triangle.2.circlepath") {
-                UpdateChecker.check()
-            }
-            menu.addItem(updateItem)
-            #endif
             let quitItem = createActionItem(title: "Quit", symbolName: "power") {
                 NSApplication.shared.terminate(nil)
             }

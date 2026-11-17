@@ -46,6 +46,7 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private var snapshotsTaken = 0
     private var configured = false
     private var wanted = false
+    private var askingForAccess = false
 
     // State below is only touched on `queue`.
     private var lastFrame: TimeInterval = 0
@@ -63,7 +64,10 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         case .authorized:
             startSession()
         case .notDetermined:
+            guard !askingForAccess else { return }      // ask once
+            askingForAccess = true
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                self?.askingForAccess = false
                 if granted { self?.startSession() } else { log.error("camera access denied") }
             }
         default:

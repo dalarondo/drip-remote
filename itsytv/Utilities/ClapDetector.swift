@@ -34,6 +34,8 @@ final class ClapDetector: NSObject, SNResultsObserving {
     private var running = false
     /// Listening is wanted (between `start()` and `shutDown()`), even if the engine is momentarily down.
     private var wanted = false
+    private var askingForAccess = false
+    private var lastEngineStart: TimeInterval = 0
 
     /// Stop for good (leaving command mode).
     func shutDown() {
@@ -61,8 +63,15 @@ final class ClapDetector: NSObject, SNResultsObserving {
         case .authorized:
             startEngine()
         case .notDetermined:
+            // Ask once. Touching the audio engine before the answer makes macOS ask again,
+            // so nothing else starts until this returns.
+            guard !askingForAccess else { return }
+            askingForAccess = true
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                DispatchQueue.main.async { if granted { self?.startEngine() } }
+                DispatchQueue.main.async {
+                    self?.askingForAccess = false
+                    if granted { self?.startEngine() }
+                }
             }
         default:
             log.error("microphone access denied – clap detection is off")
@@ -95,7 +104,10 @@ final class ClapDetector: NSObject, SNResultsObserving {
     }
 
     private func startEngine() {
-        guard !running else { return }
+        // Never touch the microphone without permission already granted: each attempt
+        // would put up another permission prompt.
+        guard !running, wanted, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        lastEngineStart = ProcessInfo.processInfo.systemUptime
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
@@ -130,7 +142,10 @@ final class ClapDetector: NSObject, SNResultsObserving {
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
-            self?.restart(reason: "audio configuration changed")
+            // Starting the engine itself triggers a burst of these; ignore that burst, or
+            // each one would tear the engine down and start it again.
+            guard let self, ProcessInfo.processInfo.systemUptime - self.lastEngineStart > 2 else { return }
+            self.restart(reason: "audio configuration changed")
         }
 
         do {
