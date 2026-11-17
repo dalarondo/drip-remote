@@ -36,6 +36,13 @@ struct RemoteControlView: View {
                     .font(.subheadline)
                     .lineLimit(1)
                 Spacer()
+                if TouchMode.shared.islandStyle {
+                    PowerButton {
+                        manager.pressButton(.pageDown)
+                    } onLongPress: {
+                        manager.pressButton(.pageDown, action: .hold)
+                    }
+                }
                 // Expand into command center (same as pinching out on the remote).
                 Button {
                     NotificationCenter.default.post(name: .toggleCommandMode, object: nil)
@@ -142,8 +149,8 @@ struct RemoteControlView: View {
                     }
                     .animation(nil, value: selectedTab)
 
-                    // Floating buttons over remote content
-                    if selectedTab == .remote {
+                    // Floating buttons over remote content (island style puts them elsewhere)
+                    if selectedTab == .remote && !TouchMode.shared.islandStyle {
                         HStack {
                             // Keyboard button
                             Button {
@@ -279,6 +286,9 @@ struct NowPlayingBar: View {
                     .frame(height: 160)
             }
 
+            // Island style puts the title and transport side by side to save height.
+            let row = TouchMode.shared.islandStyle ? AnyLayout(HStackLayout(spacing: 16)) : AnyLayout(VStackLayout(spacing: 6))
+            row {
             // Title + artist
             VStack(spacing: 2) {
                 Text(np?.title ?? " ")
@@ -333,6 +343,8 @@ struct NowPlayingBar: View {
                 .disabled(!hasContent || !mrp.supportedCommands.contains(.nextTrack))
             }
             .foregroundStyle(.secondary)
+            .fixedSize()
+            } // row
 
             // Progress bar
             NowPlayingProgress(
@@ -551,8 +563,9 @@ struct RemoteTabContent: View {
 
     private var touch: Bool { TouchMode.shared.isTouch }
     private var padding: CGFloat { touch ? 16 : 8 }
-    private var buttonSize: CGFloat { touch ? 78 : 60 }
-    private var buttonGap: CGFloat { touch ? 18 : 12 }
+    private var island: Bool { TouchMode.shared.islandStyle }
+    private var buttonSize: CGFloat { island ? 80 : (touch ? 78 : 60) }
+    private var buttonGap: CGFloat { island ? 14 : (touch ? 18 : 12) }
 
     private func back(_ action: InputAction) {
         if action == .hold {
@@ -563,9 +576,30 @@ struct RemoteTabContent: View {
     }
 
     var body: some View {
+        if island { islandBody } else { stackedBody }
+    }
+
+    /// Island style: wide and short – D-pad on the left, buttons on the right.
+    private var islandBody: some View {
+        let side = buttonSize * 3 + buttonGap * 2        // the buttons block is this wide
+        return HStack(alignment: .center, spacing: 20) {
+            DPadView(
+                onPress: { button, action in manager.pressButton(button, action: action) },
+                size: side,
+                swipeEnabled: swipeEnabled,
+                height: side
+            )
+            touchButtons
+        }
+        .padding(.horizontal, padding)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+    }
+
+    private var stackedBody: some View {
         let dpadSize: CGFloat = touch ? 232 : 150
 
-        VStack(spacing: touch ? 20 : 4) {
+        return VStack(spacing: touch ? 20 : 4) {
             // D-pad
             DPadView(
                 onPress: { button, action in manager.pressButton(button, action: action) },
@@ -602,6 +636,19 @@ struct RemoteTabContent: View {
                 RemoteCircleButton(imageName: "btnMute", button: .siri, shortcut: .mute, size: buttonSize) { action in
                     guard action == .click else { return }
                     manager.toggleMute()
+                }
+                if island {
+                    // The floating keyboard button would sit on the pad here, so it joins the grid.
+                    Image(systemName: "keyboard")
+                        .font(.system(size: buttonSize * 0.3, weight: .medium))
+                        .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
+                        .frame(width: buttonSize, height: buttonSize)
+                        .background(ControlBackground(shape: Circle()))
+                        .overlay(RemoteButtonGesture { action in
+                            guard action == .click else { return }
+                            manager.keyboardToggleCounter &+= 1
+                        })
+                        .help("Type on Apple TV")
                 }
             }
             VolumePill(

@@ -798,7 +798,8 @@ final class AppController: NSObject, NSMenuDelegate {
         }
         let island = CommandModeController.islandRect(on: screen)
         // Tucked up under the island widget's pill, so the remote's neck runs into it.
-        let top = screen.frame.maxY - island.maxY + 14
+        RemotePour.neckWidth = island.width + IslandWidgetView.ear * 2     // exactly the pill's width
+        let top = screen.frame.maxY - island.maxY + 22
         let h = min(height, top - screen.visibleFrame.minY - 8)
         return NSRect(x: screen.frame.minX + island.midX - width / 2, y: top - h, width: width, height: h)
     }
@@ -1403,8 +1404,9 @@ private struct IslandRemoteStyle: ViewModifier {
 /// body. `progress` 0 → 1 pours it out in one smooth motion – the neck extends first,
 /// then the body widens and lengthens beneath it. No wobble, no splash.
 struct RemotePour: Shape {
-    static let neckHeight: CGFloat = 30
-    static let neckWidth: CGFloat = 104
+    static let neckHeight: CGFloat = 36
+    /// Matches the island widget's compact pill, so the two edges meet (set from the screen's island).
+    static var neckWidth: CGFloat = 187
 
     var progress: CGFloat
 

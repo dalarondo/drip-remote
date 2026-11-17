@@ -111,7 +111,8 @@ struct IslandWidgetView: View {
     @AppStorage("commandModeRed") private var redOnBlack = false
 
     /// Width of each "ear" either side of the camera in the compact pill.
-    private let ear: CGFloat = 64
+    static let ear: CGFloat = 64
+    private var ear: CGFloat { Self.ear }
     private let expandedSize = CGSize(width: 420, height: 262)
 
     private var isPlaying: Bool { manager.mrpManager.nowPlaying?.isPlaying == true }
@@ -143,6 +144,10 @@ struct IslandWidgetView: View {
         .frame(width: width, height: height)
         .contentShape(Rectangle())
         .onTapGesture { if !expanded { state.expanded = true } }
+        // Interacting with the island takes over: the remote shrinks back in as it expands.
+        .onChange(of: state.expanded) { _, isExpanded in
+            if isExpanded, state.remoteIsOpen { onRemote() }
+        }
         .animation(.spring(response: 0.4, dampingFraction: 0.78), value: expanded)
         .colorMultiply(redOnBlack ? Color(red: 1, green: 0.12, blue: 0.08) : .white)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

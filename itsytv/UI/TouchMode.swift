@@ -30,6 +30,8 @@ final class TouchMode: NSObject, NSGestureRecognizerDelegate {
     /// Panel width in each layout.
     static let compactWidth: CGFloat = 176
     static let touchWidth: CGFloat = 300
+    /// Island style: wide and short – D-pad and buttons side by side.
+    static let islandWidth: CGFloat = 588
 
     private(set) var preference: TouchLayoutPreference
     private(set) var touchDetected = false
@@ -59,7 +61,7 @@ final class TouchMode: NSObject, NSGestureRecognizerDelegate {
         }
     }
 
-    var panelWidth: CGFloat { isTouch ? Self.touchWidth : Self.compactWidth }
+    var panelWidth: CGFloat { islandStyle ? Self.islandWidth : (isTouch ? Self.touchWidth : Self.compactWidth) }
 
     private override init() {
         preference = Self.storedPreference()
