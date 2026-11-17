@@ -16,6 +16,12 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+/// Can take keyboard focus (while expanded) without activating the app, so the remote's
+/// keyboard shortcuts work from the island while another app stays in front.
+private final class IslandPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
 final class IslandWidgetController {
     private let manager: AppleTVManager
     private var panel: NSPanel?
@@ -56,7 +62,7 @@ final class IslandWidgetController {
             x: screen.frame.minX + island.midX - size.width / 2,
             y: screen.frame.maxY - size.height
         )
-        let panel = NSPanel(
+        let panel = IslandPanel(
             contentRect: NSRect(origin: origin, size: size),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false
         )
@@ -75,7 +81,7 @@ final class IslandWidgetController {
             islandSize: island.size,
             onDrip: { [weak self] in self?.onDrip?() },
             onRemote: { [weak self] in self?.onRemote?() },
-            onExpandedChange: { [weak self] in self?.onExpandedChange?($0) }
+            onExpandedChange: { [weak self] in self?.expandedChanged($0) }
         )
         .environment(manager)
 
@@ -90,6 +96,23 @@ final class IslandWidgetController {
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.state.expanded = false
         }
+    }
+
+    /// The widget's window, for routing keyboard shortcuts while it is expanded.
+    var window: NSWindow? { panel }
+
+    private func expandedChanged(_ expanded: Bool) {
+        if let panel {
+            if expanded {
+                // Take the keyboard: arrows, Return, Esc, Space… now drive the Apple TV.
+                panel.makeKey()
+            } else if panel.isKeyWindow {
+                // Hand the keyboard back to whatever app is in front.
+                panel.orderOut(nil)
+                panel.orderFrontRegardless()
+            }
+        }
+        onExpandedChange?(expanded)
     }
 
     func hide() {

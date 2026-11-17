@@ -955,7 +955,8 @@ final class AppController: NSObject, NSMenuDelegate {
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             // Only keys typed into the remote itself – not into the shortcuts window or Settings.
             guard let self, let window = event.window, window.isVisible,
-                  window === self.panel || window === self.commandMode.window else { return event }
+                  window === self.panel || window === self.commandMode.window
+                    || window === self.islandWidget.window else { return event }
             let handled = event.type == .keyUp ? self.handleRemoteKeyUp(event) : self.handleRemoteKeyDown(event)
             return handled ? nil : event
         }
@@ -1020,6 +1021,8 @@ final class AppController: NSObject, NSMenuDelegate {
         case .close:
             if commandMode.isActive {
                 exitCommandMode()
+            } else if let widget = islandWidget.window, widget.isKeyWindow {
+                islandWidget.collapse()     // ⌘W on the open island closes it
             } else if islandStyleRemote {
                 toggleIslandRemote()        // back into the island; Disconnect is in the ⋯ menu
             } else {
