@@ -56,6 +56,32 @@ struct ControlBackground<S: Shape>: View {
     }
 }
 
+/// The visible region of command center: the island's pill when `progress` is 0, the
+/// whole screen when it is 1. Animating `progress` makes the panel pour out of the island.
+struct IslandReveal: Shape {
+    let island: CGRect
+    var progress: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let p = max(0, progress)
+        let r = CGRect(
+            x: island.minX + (rect.minX - island.minX) * p,
+            y: island.minY + (rect.minY - island.minY) * p,
+            width: island.width + (rect.width - island.width) * p,
+            height: island.height + (rect.height - island.height) * p
+        )
+        guard r.width > 0, r.height > 0 else { return Path() }
+        // Pill-shaped in the island, square once it fills the screen.
+        let radius = min(r.width, r.height) / 2 * max(0, 1 - p)
+        return Path(roundedRect: r, cornerRadius: radius)
+    }
+}
+
 // MARK: - Window
 
 private final class CommandModeWindow: NSWindow {
@@ -72,6 +98,8 @@ final class CommandModeState {
         didSet { if textEntryActive != oldValue { onTextEntryChange?() } }
     }
     @ObservationIgnored var onTextEntryChange: (() -> Void)?
+    /// The panel has expanded out of the island (false = collapsed into it).
+    var revealed = false
     /// The apps page is showing instead of the controls.
     var showingApps = false
     /// The full-screen playback page is showing.
@@ -142,8 +170,9 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         let window = CommandModeWindow(
             contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false, screen: screen
         )
-        window.backgroundColor = .black
-        window.isOpaque = true
+        // Transparent: the black panel is drawn by the view, so it can grow out of the island.
+        window.backgroundColor = .clear
+        window.isOpaque = false
         window.hasShadow = false
         window.isReleasedWhenClosed = false
         window.level = Self.shieldLevel
@@ -151,7 +180,8 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         window.appearance = NSAppearance(named: .darkAqua)
         window.acceptsMouseMovedEvents = true
 
-        let root = CommandModeView(state: state, topInset: screen.safeAreaInsets.top) { [weak self] in
+        let root = CommandModeView(state: state, topInset: screen.safeAreaInsets.top,
+                                   island: Self.islandRect(on: screen)) { [weak self] in
             self?.onExit?()
         }
         .environment(manager)
@@ -171,14 +201,17 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         hosting.addGestureRecognizer(pan)
         window.setFrame(screen.frame, display: true)
 
+        // Pinch in (two fingers, or the trackpad) shrinks back to the small remote.
+        let pinch = NSMagnificationGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        pinch.delegate = self
+        hosting.addGestureRecognizer(pinch)
+
         NSApp.activate(ignoringOtherApps: true)
-        window.alphaValue = 0
+        state.revealed = false
         window.makeKeyAndOrderFront(nil)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
-            window.animator().alphaValue = 1
-        }
         self.window = window
+        // Next run loop, so the view first draws collapsed in the island, then expands.
+        DispatchQueue.main.async { [weak self] in self?.state.revealed = true }
 
         state.dimmed = false
         activityMonitor = NSEvent.addLocalMonitorForEvents(
@@ -339,15 +372,33 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         isLeaving = true
         state.dimmed = false
         state.leaving = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.25
-                window.animator().alphaValue = 0
-            }, completionHandler: {
+        _ = window
+        // Controls morph back to round, then the panel retreats into the island.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.state.revealed = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self?.close()
                 completion()
-            })
+            }
         }
+    }
+
+    @objc private func handlePinch(_ pinch: NSMagnificationGestureRecognizer) {
+        guard !isLeaving, pinch.state == .changed || pinch.state == .ended else { return }
+        if pinch.magnification < -0.25 { onExit?() }
+    }
+
+    /// Where the camera island (or notch) sits, in top-left-origin screen coordinates:
+    /// the gap between the two usable strips either side of it. On a screen without
+    /// one, a small pill at the top centre stands in.
+    private static func islandRect(on screen: NSScreen) -> CGRect {
+        let frame = screen.frame
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea,
+           right.minX > left.maxX, screen.safeAreaInsets.top > 0 {
+            let height = screen.safeAreaInsets.top
+            return CGRect(x: left.maxX - frame.minX, y: 0, width: right.minX - left.maxX, height: height)
+        }
+        return CGRect(x: frame.width / 2 - 60, y: 6, width: 120, height: 30)
     }
 
     func close() {
@@ -387,6 +438,8 @@ struct CommandModeView: View {
     @Environment(AppIconLoader.self) private var iconLoader
     let state: CommandModeState
     let topInset: CGFloat
+    /// The camera island's rect in this view's coordinates; the panel grows out of it.
+    let island: CGRect
     let onExit: () -> Void
 
     @State private var showingKeyboard = false
@@ -439,7 +492,7 @@ struct CommandModeView: View {
                         }
                         HStack(alignment: .top) {
                             if !isConnected {
-                                Text("Reconnecting…")
+                                Text("Connecting…")
                                     .font(.system(size: unit * 0.22, weight: .medium))
                                     .foregroundStyle(.white.opacity(0.4))
                             }
@@ -565,8 +618,17 @@ struct CommandModeView: View {
             .opacity(state.dimmed ? 0.3 : 1)
             .animation(.easeInOut(duration: state.dimmed ? 2 : 0.2), value: state.dimmed)
         }
+        .clipShape(IslandReveal(island: island, progress: state.revealed ? 1 : 0))
+        .animation(.spring(response: 0.5, dampingFraction: 0.86), value: state.revealed)
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
+        .onChange(of: manager.connectionStatus) { _, status in
+            // Errors are shown by the small remote, so step back to it.
+            switch status {
+            case .error, .localNetworkDenied: onExit()
+            default: break
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .startDictation)) { _ in
             showingKeyboard = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -576,7 +638,7 @@ struct CommandModeView: View {
         .onChange(of: manager.keyboardToggleCounter) { _, _ in toggleKeyboard() }
         .onAppear {
             // Morph from the remote's round controls into the square pad and pills.
-            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(0.25)) { morphed = true }
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(0.45)) { morphed = true }
         }
         .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
         .onChange(of: state.leaving) { _, leaving in

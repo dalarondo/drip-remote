@@ -625,6 +625,15 @@ final class AppController: NSObject, NSMenuDelegate {
         TouchMode.shared.onChange = { [weak self] in self?.applyPanelLayout(animated: true) }
         if TouchMode.shared.isTouch { applyPanelLayout(animated: false) }
 
+        // Pinch out on the small remote expands it into command center.
+        let pinch = NSMagnificationGestureRecognizer(target: self, action: #selector(handlePanelPinch(_:)))
+        vibrancy.addGestureRecognizer(pinch)
+
+        // Command center is the primary interface: open straight into it.
+        if UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true {
+            enterCommandMode()
+        }
+
         // Observe "Always on top" toggle changes while panel is open
         alwaysOnTopObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
@@ -672,6 +681,11 @@ final class AppController: NSObject, NSMenuDelegate {
         panel?.orderOut(nil)
         TouchMode.shared.commandModeActive = true
         commandMode.show(preferredScreen: screen)
+    }
+
+    @objc private func handlePanelPinch(_ pinch: NSMagnificationGestureRecognizer) {
+        guard pinch.state == .changed || pinch.state == .ended, pinch.magnification > 0.25 else { return }
+        enterCommandMode()
     }
 
     private func exitCommandMode() {
@@ -971,6 +985,7 @@ struct PanelMenuButton: View {
     @AppStorage("showShortcutHints") private var showShortcutHints = false
     @AppStorage("showArtwork") private var showArtwork = true
     @AppStorage("commandModeRed") private var commandModeRed = false
+    @AppStorage("openInCommandCenter") private var openInCommandCenter = true
     @AppStorage("commandModeDimKeyboard") private var commandModeDimKeyboard = true
     @AppStorage("commandModeClap") private var commandModeClap = false
     @AppStorage("commandModeGestures") private var commandModeGestures = false
@@ -982,8 +997,9 @@ struct PanelMenuButton: View {
 
     var body: some View {
         Menu {
-            Menu("Command mode") {
-                Button("Enter command mode") {
+            Menu("Command center") {
+                Toggle("Open in command center", isOn: $openInCommandCenter)
+                Button("Enter command center") {
                     NotificationCenter.default.post(name: .toggleCommandMode, object: nil)
                 }
                 Divider()

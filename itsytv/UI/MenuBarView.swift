@@ -36,6 +36,19 @@ struct RemoteControlView: View {
                     .font(.subheadline)
                     .lineLimit(1)
                 Spacer()
+                // Expand into command center (same as pinching out on the remote).
+                Button {
+                    NotificationCenter.default.post(name: .toggleCommandMode, object: nil)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: touch ? 14 : 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: touch ? 36 : 20, height: touch ? 36 : 20)
+                        .background(Circle().fill(Color.secondary.opacity(0.15)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Command center")
                 PanelMenuButton(deviceID: manager.connectedDeviceID ?? "") {
                     if let deviceID = manager.connectedDeviceID {
                         KeychainStorage.delete(for: deviceID)
