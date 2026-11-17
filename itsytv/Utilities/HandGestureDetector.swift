@@ -1,6 +1,7 @@
 import AVFoundation
 import Vision
 import os.log
+import CoreImage
 
 private let log = Logger(subsystem: "com.itsytv.app", category: "Gesture")
 
@@ -39,6 +40,10 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private let bodyRequest = VNDetectHumanBodyPoseRequest()
     private var wristTracks: [String: [(t: TimeInterval, x: CGFloat, y: CGFloat)]] = [:]
     private var lastDiagnostic: TimeInterval = 0
+    // Debugging aid: when `ITSYTV_GESTURE_DEBUG_DIR` (or the `gestureDebugSnapshotDir` default) is set, two frames are
+    // saved there (about 6 s and 14 s after the camera starts) so the picture can be inspected.
+    private var sessionStart: TimeInterval = 0
+    private var snapshotsTaken = 0
     private var configured = false
     private var wanted = false
 
@@ -103,6 +108,8 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
             }
             self.current = nil
             self.armed = true
+            self.sessionStart = ProcessInfo.processInfo.systemUptime
+            self.snapshotsTaken = 0
             if !self.session.isRunning {
                 self.session.startRunning()
                 log.notice("camera watching for hand gestures")
@@ -120,6 +127,18 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         let height = CGFloat(CVPixelBufferGetHeight(pixels))
         let handler = VNImageRequestHandler(cvPixelBuffer: pixels, orientation: .up)
 
+        if snapshotsTaken < 2, now - sessionStart > (snapshotsTaken == 0 ? 6 : 14),
+           let dir = ProcessInfo.processInfo.environment["ITSYTV_GESTURE_DEBUG_DIR"]
+               ?? UserDefaults.standard.string(forKey: "gestureDebugSnapshotDir") {
+            snapshotsTaken += 1
+            let image = CIImage(cvPixelBuffer: pixels).transformed(by: CGAffineTransform(scaleX: 0.5, y: 0.5))
+            let url = URL(fileURLWithPath: dir).appendingPathComponent("gesture-frame-\(snapshotsTaken).jpg")
+            if let data = CIContext().jpegRepresentation(of: image, colorSpace: CGColorSpaceCreateDeviceRGB()) {
+                try? data.write(to: url)
+                log.notice("saved debug frame \(self.snapshotsTaken)")
+            }
+        }
+
         // 1. Whole frame – works when the hand is close to the camera.
         request.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
         var failure: String?
@@ -129,9 +148,13 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
 
         // 2. At a distance: find the body, then look for a hand in a close crop around each wrist.
         do { try handler.perform([bodyRequest]) } catch { failure = "body: \(error.localizedDescription)" }
-        let body = bodyRequest.results?.first
+        // Everyone in frame counts – the person gesturing is not always the first one found.
+        let bodies = bodyRequest.results ?? []
+        let body = bodies.first
         var wave: Gesture?
-        if let body, let joints = try? body.recognizedPoints(.all) {
+        if bodies.isEmpty { wristTracks.removeAll() }
+        for (index, person) in bodies.enumerated() {
+            guard let joints = try? person.recognizedPoints(.all) else { continue }
             func j(_ name: VNHumanBodyPoseObservation.JointName) -> CGPoint? {
                 guard let point = joints[name], point.confidence >= minConfidence else { return nil }
                 return CGPoint(x: point.location.x * width, y: point.location.y * height)   // pixels
@@ -141,8 +164,9 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
                 return hypot(l.x - r.x, l.y - r.y)
             }()
 
-            for (side, wristName, elbowName) in [("L", VNHumanBodyPoseObservation.JointName.leftWrist, VNHumanBodyPoseObservation.JointName.leftElbow),
+            for (hand, wristName, elbowName) in [("L", VNHumanBodyPoseObservation.JointName.leftWrist, VNHumanBodyPoseObservation.JointName.leftElbow),
                                                   ("R", .rightWrist, .rightElbow)] {
+                let side = "\(index)\(hand)"
                 guard let wrist = j(wristName), let elbow = j(elbowName) else {
                     wristTracks[side] = nil
                     continue
@@ -169,14 +193,12 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
                 hands += request.results?.count ?? 0
                 seen = (request.results ?? []).compactMap { classify($0, scaleX: roiPx.width, scaleY: roiPx.height) }.first
             }
-        } else {
-            wristTracks.removeAll()
         }
 
         if now - lastDiagnostic > 3 {
             lastDiagnostic = now
             let joints = (try? body?.recognizedPoints(.all))?.values.filter { $0.confidence >= self.minConfidence }.count ?? 0
-            log.notice("seeing: \(Int(width))x\(Int(height)) brightness \(Self.brightness(pixels), format: .fixed(precision: 2)) body \(body != nil, privacy: .public) joints \(joints) hands \(hands) shape \(seen?.rawValue ?? "none", privacy: .public) error \(failure ?? "none", privacy: .public)")
+            log.notice("seeing: \(Int(width))x\(Int(height)) brightness \(Self.brightness(pixels), format: .fixed(precision: 2)) people \(bodies.count) joints \(joints) hands \(hands) shape \(seen?.rawValue ?? "none", privacy: .public) error \(failure ?? "none", privacy: .public)")
         }
 
         if let wave, now - lastFire > cooldown {
