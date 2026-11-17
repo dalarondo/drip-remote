@@ -94,6 +94,8 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
                 if self.session.canAddInput(input) { self.session.addInput(input) }
                 let output = AVCaptureVideoDataOutput()
                 output.alwaysDiscardsLateVideoFrames = true
+                // Biplanar YUV: plane 0 is brightness, which the diagnostics sample.
+                output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
                 output.setSampleBufferDelegate(self, queue: self.queue)
                 if self.session.canAddOutput(output) { self.session.addOutput(output) }
                 self.session.commitConfiguration()
@@ -120,12 +122,13 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
 
         // 1. Whole frame – works when the hand is close to the camera.
         request.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
-        try? handler.perform([request])
+        var failure: String?
+        do { try handler.perform([request]) } catch { failure = "hand: \(error.localizedDescription)" }
         var hands = request.results?.count ?? 0
         var seen = (request.results ?? []).compactMap { classify($0, scaleX: width, scaleY: height) }.first
 
         // 2. At a distance: find the body, then look for a hand in a close crop around each wrist.
-        try? handler.perform([bodyRequest])
+        do { try handler.perform([bodyRequest]) } catch { failure = "body: \(error.localizedDescription)" }
         let body = bodyRequest.results?.first
         var wave: Gesture?
         if let body, let joints = try? body.recognizedPoints(.all) {
@@ -172,7 +175,8 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
 
         if now - lastDiagnostic > 3 {
             lastDiagnostic = now
-            log.notice("seeing: body \(body != nil, privacy: .public) hands \(hands) shape \(seen?.rawValue ?? "none", privacy: .public)")
+            let joints = (try? body?.recognizedPoints(.all))?.values.filter { $0.confidence >= self.minConfidence }.count ?? 0
+            log.notice("seeing: \(Int(width))x\(Int(height)) brightness \(Self.brightness(pixels), format: .fixed(precision: 2)) body \(body != nil, privacy: .public) joints \(joints) hands \(hands) shape \(seen?.rawValue ?? "none", privacy: .public) error \(failure ?? "none", privacy: .public)")
         }
 
         if let wave, now - lastFire > cooldown {
@@ -183,6 +187,24 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
             return
         }
         update(seen: seen, now: now)
+    }
+
+    /// Average brightness of the frame, 0 (black) to 1 (white), from a sparse sample.
+    private static func brightness(_ pixels: CVPixelBuffer) -> Double {
+        CVPixelBufferLockBaseAddress(pixels, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        guard CVPixelBufferGetPlaneCount(pixels) > 0, let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return -1 }
+        let w = CVPixelBufferGetWidthOfPlane(pixels, 0), h = CVPixelBufferGetHeightOfPlane(pixels, 0)
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var sum = 0, count = 0
+        for y in Swift.stride(from: 0, to: h, by: 16) {
+            for x in Swift.stride(from: 0, to: w, by: 16) {
+                sum += Int(bytes[y * stride + x])
+                count += 1
+            }
+        }
+        return count > 0 ? Double(sum) / Double(count) / 255 : -1
     }
 
     /// Sideways travel of a raised wrist within the wave window, in shoulder-widths.
