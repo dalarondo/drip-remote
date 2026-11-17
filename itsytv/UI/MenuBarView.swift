@@ -640,7 +640,10 @@ struct RemoteTabContent: View {
                 if island {
                     // The floating keyboard button would sit on the pad here, so it joins the grid.
                     Image(systemName: "keyboard")
-                        .font(.system(size: buttonSize * 0.3, weight: .medium))
+                        .resizable()
+                        .scaledToFit()
+                        .fontWeight(.medium)
+                        .frame(width: buttonSize * 0.36, height: buttonSize * 0.36)
                         .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
                         .frame(width: buttonSize, height: buttonSize)
                         .background(ControlBackground(shape: Circle()))
@@ -1257,8 +1260,13 @@ struct DictateButton: View {
     @State private var blinkOpacity: Double = 0
 
     var body: some View {
+        // Sized by frame, not font size: a frame animates smoothly while the button morphs,
+        // a font size snaps.
         Image(systemName: "mic.fill")
-            .font(.system(size: size * 0.33, weight: .medium))
+            .resizable()
+            .scaledToFit()
+            .fontWeight(.medium)
+            .frame(width: size * 0.36, height: size * 0.36)
             .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
             .frame(width: width ?? size, height: size)
             .background(ControlBackground(shape: Capsule()))
@@ -1484,7 +1492,10 @@ struct VolumePill: View {
     private var minusButton: some View {
         Button(action: { blink(); onDown() }) {
             Image(systemName: "minus")
-                .font(.system(size: min(width, height) * 0.3, weight: .medium))
+                .resizable()
+                .scaledToFit()
+                .fontWeight(.medium)
+                .frame(width: min(width, height) * 0.3, height: min(width, height) * 0.3)
                 .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
@@ -1500,7 +1511,10 @@ struct VolumePill: View {
             if horizontal { minusButton }
             Button(action: { blink(); onUp() }) {
                 Image(systemName: "plus")
-                    .font(.system(size: min(width, height) * 0.3, weight: .medium))
+                    .resizable()
+                    .scaledToFit()
+                    .fontWeight(.medium)
+                    .frame(width: min(width, height) * 0.3, height: min(width, height) * 0.3)
                     .foregroundStyle(Color(nsColor: DS.Colors.remoteButtonForeground))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())

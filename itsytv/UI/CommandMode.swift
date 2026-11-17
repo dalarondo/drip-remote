@@ -817,7 +817,7 @@ struct CommandModeView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { state.revealed = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.45) { state.contentVisible = true }
             // Morph from the remote's round controls into the square pad and pills.
-            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(2.1)) { morphed = true }
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(1.5)) { morphed = true }
         }
         .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
         .onChange(of: state.leaving) { _, leaving in
@@ -1005,7 +1005,10 @@ struct CommandModeView: View {
     private func glyphButton(_ symbol: String, size: CGFloat, width: CGFloat? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: size * 0.33, weight: .medium))
+                .resizable()
+                .scaledToFit()
+                .fontWeight(.medium)
+                .frame(width: size * 0.36, height: size * 0.36)
                 .foregroundStyle(.white.opacity(0.85))
                 .frame(width: width ?? size, height: size)
                 .background(ControlBackground(shape: Capsule()))
