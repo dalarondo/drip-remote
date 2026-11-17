@@ -1035,7 +1035,12 @@ final class AppController: NSObject, NSMenuDelegate {
             manager.toggleMute()
             manager.triggerKeyboardBlink(.siri)
         default:
-            guard let button = shortcut.companionButton else { return false }
+            guard var button = shortcut.companionButton else { return false }
+            // Full-screen command center: Esc is Home (TV button), and so that Back keeps
+            // a key, Delete – normally Home – becomes Back.
+            if commandMode.isActive {
+                if shortcut == .back { button = .home } else if shortcut == .home { button = .menu }
+            }
             if shortcut.hasHoldAction {
                 if event.isARepeat {
                     log.debug("key: repeat swallowed")
