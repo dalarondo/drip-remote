@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.entertainment</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleScriptEnabled</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Drip Remote listens for a double clap to play or pause while command center is open, and uses dictation to type on your Apple TV. Audio is analysed on this Mac and never recorded or sent anywhere.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Drip Remote watches for hand gestures (palm or wave to pause, thumbs-up or wave to play) while command center is open. Video is analysed on this Mac and never recorded or sent anywhere.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Drip Remote needs local network access to discover and control Apple TV devices on your network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_companion-link._tcp</string>
+		<string>_mediaremotetv._tcp</string>
+	</array>
+	<key>OSAScriptingDefinition</key>
+	<string>DripRemote.sdef</string>
+</dict>
+</plist>

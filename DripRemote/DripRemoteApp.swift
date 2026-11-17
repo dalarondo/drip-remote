@@ -1,0 +1,61 @@
+import SwiftUI
+import AppIntents
+import ItsytvCore
+
+@main
+struct DripRemoteApp: App {
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
+
+    var body: some Scene {
+        Settings {
+            SettingsView()
+                .environment(appDelegate.manager)
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static private(set) weak var shared: AppDelegate?
+
+    let manager = AppleTVManager()
+    let iconLoader = AppIconLoader()
+    var appController: AppController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        ItsytvCoreLog.verbose = true
+        #endif
+        Self.shared = self
+        KeyboardBacklight.shared.recoverAfterCrash()
+        if DockIcon.isOn { DockIcon.apply() }
+        appController = AppController(manager: manager, iconLoader: iconLoader)
+        DripRemoteShortcuts.updateAppShortcutParameters()
+        // Give the menu bar a moment to place the icon before checking whether it can be seen.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.greet()
+        }
+    }
+
+    /// The welcome, when `WelcomeGate` says a new user needs it.
+    private func greet() {
+        guard let appController else { return }
+        let hasUsedApp = manager.lastConnectedDeviceID != nil
+        let showWelcome = WelcomeGate(defaults: .standard).shouldShow(
+            hasUsedApp: hasUsedApp, iconHidden: appController.isIconHidden, inDock: DockIcon.isOn)
+        if showWelcome {
+            WelcomeWindow.show(iconHidden: { appController.isIconHidden }, showDevices: appController.showDevices)
+        }
+    }
+
+    /// Opening Drip Remote again while it runs shows the remote or the device menu (`AppController.handleReopen`).
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        appController?.handleReopen()
+        return false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        appController?.cleanup()
+        // Never quit with the keyboard backlight left off by command mode.
+        KeyboardBacklight.shared.restore()
+    }
+}

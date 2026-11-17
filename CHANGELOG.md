@@ -1,147 +1,51 @@
 # Changelog
 
-## 1.9.0
-
-- Bring the remote to the desktop you're on – with the remote open on another desktop or behind a full-screen app, clicking the menu bar icon, choosing the Apple TV in the menu or pressing its hotkey moved you back to the remote, or did nothing. The remote now comes to you, still connected, and moves back on screen if its saved position is off every display. The hotkey closes the remote only when it's open on the current desktop (#52, thanks @tetanus for the request and @Lemelson for the fix)
-
-## 1.8.0
-
-- Hold keys like the buttons on the Siri Remote – holding esc goes to the Home screen, ⌫ opens Control Center and ↩ the context menu. A held key used to send a click for every key repeat, so a hold never reached the Apple TV (thanks @Lemelson)
-- Add keyboard shortcut hints – "Show shortcut hints" in the remote's ⋯ menu labels every control with its key (thanks @Lemelson)
-- Add a Keyboard shortcuts window (⋯ → "Keyboard shortcuts…") – a copy of the remote with every key, to try them without sending anything to the Apple TV. Click a row's keys to change them; keys already used by another control swap, and each row or all of them can go back to the defaults (thanks @Lemelson)
-- Add "Show artwork" to the ⋯ menu for a shorter remote without the artwork (thanks @Lemelson)
-- Bigger close button on the remote, with a tooltip (thanks @Lemelson)
-- Keys now only control the Apple TV while the remote is the active window – typing in Settings no longer reaches the TV, and ⌘W there no longer disconnects. Shortcuts now need their exact modifiers: ⇧ with an arrow no longer moves (thanks @Lemelson)
-- Fix pairing waiting forever on a PIN the Apple TV never showed when macOS blocks Itsytv's local network access – Itsytv now says local network access is off and opens Privacy & Security, and goes on by itself once Itsytv is turned on under Local Network. The PIN entry now opens only once the Apple TV shows the PIN (#64, thanks @maxmadr)
-
-## 1.7.0
-
-- Add a welcome on first launch – Itsytv lives in the menu bar with no Dock icon or window, so when a full menu bar pushed its icon behind the notch, or the icon was turned off in System Settings → Menu Bar, a new user saw nothing at all. The welcome shows where to find it; while the icon is hidden it offers a lasting way in – Menu Bar settings, or keeping Itsytv in the Dock – and comes back on later launches until one of them works
-- Add Show in Dock, in the menu bar menu and in Settings – a Dock icon that opens the remote
-- Opening Itsytv again from Spotlight, Finder or the Dock while it's running now shows the remote, or the device list if no Apple TV is paired yet – under the menu bar icon, or at the top centre of the screen when the icon is hidden
-- The iPhone app suggestion (direct download) now waits until an Apple TV is paired, and never shows together with the welcome
-- Fix the Settings window: Launch at login works, and paired Apple TVs show by name and go away when removed
-- Ask for an App Store rating once the remote has been used on a few different days (App Store version only)
-
-## 1.6.2
-
-- Fix pairing hanging for ~30 seconds after entering the PIN on tvOS 27; the PIN entry now shows a spinner while the Apple TV confirms and keeps its state when the menu is reopened
-
-## 1.6.1
-
-- New app icon matching the new Apple TV remote design
-- Fix white corner artifacts on the remote window against bright backgrounds and match the macOS 27 corner radius (thanks @AlexPygin)
-- Fix two-finger swipes still being sent to the Apple TV while the Apps tab is open (#57)
-
-## 1.6.0
-
-- Add swipe over the D-pad to navigate, via a two-finger trackpad swipe or a Magic Mouse swipe, matching the iOS app; direction follows your finger regardless of the natural scrolling setting
-- Click the menu bar icon to open your last connected remote directly when none is open; right-click still shows the menu
-- Fix being unable to unpair an Apple TV that has forgotten the pairing – the connection-error screen now offers "Unpair this Apple TV", and the "Taking too long?" unpair hint now reliably appears when a connection is stuck (#44)
-
-## 1.5.4
-
-- Add AppleScript `play` and `pause` verbs so automation tools (Hammerspoon, Keyboard Maestro, Shortcuts, `osascript`) can control playback idempotently without resuming a quiet TV (thanks @aporzio1)
-
-## 1.5.3
-
-- Fix apps list not loading on tvOS 26.5 by registering a TV remote control session before fetching the list (thanks to the pyatv project for finding the missing handshake step)
-
-## 1.5.2
-
-- Show a clear message when the apps list can't load on tvOS 26.5 (Apple beta regression we are working around)
-
-## 1.5.1
-
-- Show "Taking too long? Unpair" hint after 5 seconds when connection is stuck, so users can recover without Terminal
-
-## 1.5.0
-
-- Add mute button (⌘⇧M) to toggle mute on Apple TV and connected soundbars/receivers
-- Move keyboard input to top bar, toggled via keyboard icon button or ⌘K
-- Add app search bar with filtering (⌘F), off by default – enable via "Show app search" in the menu
-- Add long press support for Back (opens home), Home, and Power buttons
-## 1.4.4
-
-- Fix Korean and other IME-based input (Japanese, Chinese) not working in keyboard text entry – characters were garbled into accented Latin due to incorrect binary plist string encoding
-
-## 1.4.3
-
-- Add tap-to-toggle remaining time on the duration label (click to switch between total duration and countdown)
-
-## 1.4.2
-
-- Fix blurry now-playing artwork thumbnails by requesting higher-resolution images from Apple TV
-- Fix missing app icons for games whose tvOS bundle ID differs from their iOS listing (e.g. Tangle Tower)
-
-## 1.4.1
-
-- Fix system dock becoming inoperative after quitting itsytv (magnification and hover effects stopped working until another app was activated)
-
-## 1.4.0
-
-- Add keyboard shortcuts for Apple TV volume control (+/- keys when panel is focused)
-- Add ⌘K shortcut to toggle keyboard input
-- Add tooltip hints showing keyboard shortcuts when hovering over remote buttons
-- Make global hotkey toggle the remote panel (pressing it when already open closes it)
-- Add visual blink feedback when pressing remote buttons via keyboard
-
-## 1.3.0
-
-- Add drag-to-reorder in the Apps tab — custom order is saved per device
-- Add Shortcuts action "Open itsytv remote" for quick access from Control Center, Shortcuts app, and Spotlight
-- Fix pairing credentials lost due to rpBA (Bluetooth address) rotation — device ID reverted to stable service name
-
-## 1.2.1
-
-- Fix two Apple TVs with the same name overwriting each other's credentials by using hardware-unique device ID
-- Fix factory-reset Apple TV requiring manual unpair/re-pair — stale credentials are now auto-deleted and fresh pairing starts automatically
-- Fix seek bar drag moving the window instead of scrubbing playback
-- Fix seek bar snapping back to old position before jumping to the seeked position
-
-## 1.2.0
-
-- Keep remote buttons dark in both light and dark mode instead of inverting to white
-- Add subtle blink feedback when pressing remote buttons
-- Eliminate ~300ms click delay on remote buttons by replacing SwiftUI gesture recognizers with native event handling
-- Swap Escape and Backspace keyboard mappings (Escape = Back, Backspace = Home) for more intuitive navigation
-
-## 1.1.1
-
-- Fix remote panel not receiving keyboard focus when opened via global hotkey
-
-## 1.1.0
-
-- Add global hotkeys for Apple TVs (assign a keyboard shortcut to quickly open the remote for a specific device)
-- Show green Apple TV icon for paired devices in the menu
-- Add ⌘W and ⌘H shortcuts to close the remote panel
-
-## 1.0.6
-
-- Fix volume buttons only responding to clicks on the +/- icons instead of the entire button area
-
-## 1.0.5
-
-- Add seekable progress bar in now-playing widget (click or drag to jump to position)
-
-## 1.0.4
-
-- Fix now-playing play/pause button not working with YouTube and other third-party apps
-- Fix infinite artwork request loop when app doesn't provide album art (e.g. YouTube)
-
-## 1.0.3
-
-- Add "Check for updates..." menu item that checks GitHub releases for new versions
-- Fix missing app icons for Apple Arcade games
-
-## 1.0.2
-
-- Fix remote panel not coming to front via Mission Control when "Always on top" is disabled
-
-## 1.0.1
-
-- Fix visual glitch where now-playing artwork and app icons could overflow the panel width, causing content to be clipped on both sides
-
 ## 1.0.0
 
-- Initial release
+First release of Drip Remote, forked from [Itsytv 1.9.0](https://github.com/nickustinov/itsytv-macos)
+by Nick Ustinov. Itsytv's own history is in [docs/ITSYTV-CHANGELOG.md](docs/ITSYTV-CHANGELOG.md).
+
+### Command center
+
+- A full-screen, pure-black control panel for OLED displays: only the controls are lit, every
+  other pixel is off. Opens by default when you connect.
+- Pours out of the camera island with a drip, wobble and splash, and drains back into it.
+- Square, full-height D-pad on the left half (tap, hold, or swipe like the Siri Remote's touch
+  surface); pill-shaped buttons filling the right half.
+- Clock at the top. Tap it to switch to a banner of your own text, then to nothing.
+- Tap beside the transport controls for a full-screen playback page: big transport buttons,
+  skip 10 / 20 / 30 seconds, and a scrubber with a large grab circle.
+- Long swipe left for the apps grid.
+- Optional red-on-black colours.
+- Keeps the Mac awake, sits above notification banners, hides the cursor until a mouse or
+  trackpad moves, and dims the controls after 30 seconds idle.
+- Turns the keyboard backlight off, and back on while you type.
+- Opt-in: double clap to play or pause (microphone); raised palm, thumbs-up and waves to pause
+  and play (camera). Both run only while command center is open and are analysed on the Mac.
+
+### The island widget
+
+- Command center and the remote retract into a Live Activity-style widget around the camera
+  island. Tap it for playback controls, a scrubber, a drip button back to command center and a
+  button for the remote.
+- Keyboard shortcuts work while it is open, without bringing the app to the front.
+
+### Remote
+
+- Wide, touch-sized layout that pours out of the island and stays attached to it.
+- The text box opens by itself when a text field is focused on the Apple TV, pre-filled with
+  what is already there, and closes when the field goes away. You can also type from the
+  island widget.
+- Dictate button: speak into the Apple TV's text fields with macOS dictation.
+- Scrubbing like an iOS app: a tall touch target, a thumb, smooth progress and slower
+  scrubbing the further your finger moves from the bar.
+- Pinch in on command center for the remote; pinch out on the remote for command center.
+
+### Everything else
+
+- One Settings window for every preference, reachable from the menu bar menu, the island
+  widget, command center and the remote.
+- Touch-screen Macs and Sidecar iPads are detected through gesture recognizers, as Apple's
+  touch documentation recommends, so the cursor never triggers the touch layout.
+- Removed: update checks against the original project, Mac App Store build paths and promotions
+  for the original author's other apps.

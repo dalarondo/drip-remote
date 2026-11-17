@@ -1,0 +1,1738 @@
+import AppKit
+import SwiftUI
+import Combine
+import ServiceManagement
+import os.log
+import ObjectiveC
+import ItsytvCore
+
+private let log = Logger(subsystem: "com.dripremote.app", category: "Panel")
+
+final class AppController: NSObject, NSMenuDelegate {
+
+    let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    let menu = NSMenu()
+    private let manager: AppleTVManager
+    private let iconLoader: AppIconLoader
+    private var observation: AnyCancellable?
+    private var panel: NSPanel?
+    private var panelHostingView: NSView?
+    /// The small remote is black, hangs under the island and drips in and out of it.
+    private var islandStyleRemote = false
+    private lazy var commandMode = CommandModeController(manager: manager, iconLoader: iconLoader)
+    private var commandModeObserver: NSObjectProtocol?
+    /// What command center retracts into: a Live Activity-style pill around the island.
+    private lazy var islandWidget = IslandWidgetController(manager: manager)
+    private var islandHideToken = 0
+    /// Runs once command center has finished retracting (e.g. open Settings).
+    private var afterCommandCenterExit: (() -> Void)?
+    /// Touch layout: the panel is snapped to the right screen edge.
+    private var isDocked = false
+    private var isRedocking = false
+    /// Where the panel was before it snapped to the edge (top-left, AppKit coords).
+    private var undockedTopLeft: NSPoint?
+    private var panelDeviceID: String?
+    private var keyboardMonitor: Any?
+    private var keyHold: KeyHold?
+    private var alwaysOnTopObserver: NSObjectProtocol?
+
+    init(manager: AppleTVManager, iconLoader: AppIconLoader) {
+        self.manager = manager
+        self.iconLoader = iconLoader
+        super.init()
+        setupStatusItem()
+        // Watch the menu bar icon too, so opening the remote with a finger counts as touch.
+        if let button = statusItem.button { TouchMode.shared.attachSniffer(to: button) }
+        commandMode.onExit = { [weak self] in self?.exitCommandMode() }
+        islandWidget.onDrip = { [weak self] in self?.enterCommandMode() }
+        NotificationCenter.default.addObserver(forName: .putAwayIslandRemote, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.islandStyleRemote else { return }
+            self.hideIslandRemote()
+        }
+        NotificationCenter.default.addObserver(forName: .openSettings, object: nil, queue: .main) { [weak self] _ in
+            self?.openSettings()
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.screensChanged()
+        }
+        commandMode.onSettings = { [weak self] in self?.openSettings() }
+        islandWidget.onSettings = { [weak self] in self?.openSettings() }
+        // The island opened or closed while the remote is out.
+        islandWidget.onExpandedChange = { [weak self] expanded in
+            guard let self, let panel = self.panel, panel.isVisible, RemoteReveal.shared.revealed else { return }
+            if expanded {
+                // Interacting with the island takes over: the remote shrinks back in.
+                self.hideIslandRemote()
+            } else {
+                // The card closed under it: slide up and hang from the pill instead.
+                let frame = self.islandRemoteFrame(width: panel.frame.width, height: panel.frame.height)
+                self.isRedocking = true
+                panel.setFrame(frame, display: true, animate: true)
+                self.isRedocking = false
+            }
+        }
+        islandWidget.onRemote = { [weak self] in
+            self?.toggleIslandRemote()
+        }
+        commandModeObserver = NotificationCenter.default.addObserver(
+            forName: .toggleCommandMode, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if self.commandMode.isActive { self.exitCommandMode() } else { self.enterCommandMode() }
+        }
+        rebuildMenu()
+        startObserving()
+        setupHotkeyHandler()
+        manager.startScanning()
+    }
+
+    func cleanup() {
+        commandMode.close()
+        islandWidget.hide()
+        removeKeyboardMonitor()
+        if let observer = alwaysOnTopObserver {
+            NotificationCenter.default.removeObserver(observer)
+            alwaysOnTopObserver = nil
+        }
+        observation?.cancel()
+        observation = nil
+        HotkeyManager.shared.unregisterAll()
+        panel?.close()
+        panel = nil
+        panelDeviceID = nil
+    }
+
+    private func setupHotkeyHandler() {
+        HotkeyManager.shared.reregisterAll()
+        HotkeyManager.shared.onHotkeyPressed = { [weak self] deviceID in
+            guard let self else { return }
+            if self.islandStyleRemote, self.panel != nil, self.panelDeviceID == deviceID {
+                // Island style: the hotkey opens command center, or sends it back to the island.
+                if self.commandMode.isActive { self.exitCommandMode() } else { self.enterCommandMode() }
+            } else if self.panel?.isVisible == true && self.panel?.isOnActiveSpace == true && self.panelDeviceID == deviceID {
+                self.manager.disconnect()
+            } else {
+                self.openRemote(for: deviceID)
+            }
+        }
+    }
+
+    private var pendingOpenDeviceID: String?
+
+    func openRemote(for deviceID: String? = nil) {
+        let targetID: String?
+        if let deviceID {
+            targetID = deviceID
+        } else {
+            // Pick the first discovered device that has stored credentials
+            targetID = manager.discoveredDevices.first(where: { KeychainStorage.load(for: $0.id) != nil })?.id
+        }
+        let discoveredCount = manager.discoveredDevices.count
+        log.error("openRemote: targetID=\(targetID ?? "nil", privacy: .public) discoveredCount=\(discoveredCount, privacy: .public)")
+        guard let targetID else {
+            log.error("openRemote: no targetID, returning")
+            return
+        }
+
+        // The remote for this device is already up (maybe on another desktop or
+        // behind a full-screen app): bring it here instead of reconnecting into
+        // a window nobody can see.
+        if panel != nil, panelDeviceID == targetID, manager.connectionStatus != .disconnected {
+            log.error("openRemote: remote already open, bringing it to the current desktop")
+            bringPanelHere()
+            return
+        }
+
+        if let device = manager.discoveredDevices.first(where: { $0.id == targetID }) {
+            log.error("openRemote: device found, connecting")
+            connectAndShow(device)
+        } else {
+            log.error("openRemote: device not discovered yet, setting pendingOpenDeviceID")
+            pendingOpenDeviceID = targetID
+        }
+    }
+
+    private func connectAndShow(_ device: AppleTVDevice) {
+        manager.connect(to: device)
+        if KeychainStorage.load(for: device.id) != nil {
+            showPanel()
+        }
+    }
+
+    // MARK: - Setup
+
+    private func setupStatusItem() {
+        if let button = statusItem.button {
+            if let icon = Bundle.main.image(forResource: "MenuBarIcon") {
+                icon.isTemplate = true
+                icon.size = NSSize(width: 18, height: 18)
+                button.image = icon
+            }
+            // Handle clicks ourselves instead of attaching the menu permanently:
+            // a left-click while the remote is closed jumps straight to the last
+            // device, and one while it's open on another desktop brings it here;
+            // right-click (or a left-click with the remote open here) shows the menu.
+            button.target = self
+            button.action = #selector(statusItemClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+        menu.delegate = self
+    }
+
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        let wantsMenu = event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+
+        // The remote is open but not on this desktop (another Space, a full-screen
+        // app): a left-click fetches it here rather than showing the menu.
+        if !wantsMenu, let panel, !panel.isOnActiveSpace || !panel.isVisible {
+            bringPanelHere()
+            return
+        }
+
+        // Remote closed + a reachable, paired last device → open it directly.
+        // Everything else (remote open, right-click, no/unreachable last device)
+        // falls back to the dropdown, as before.
+        if !wantsMenu,
+           panel?.isVisible != true,
+           case .disconnected = manager.connectionStatus,
+           let lastID = lastPairedDeviceNearby {
+            openRemote(for: lastID)
+        } else {
+            showMenu()
+        }
+    }
+
+    /// The last connected Apple TV, if it's paired and on the network right now.
+    private var lastPairedDeviceNearby: String? {
+        guard let lastID = manager.lastConnectedDeviceID,
+              KeychainStorage.load(for: lastID) != nil,
+              manager.discoveredDevices.contains(where: { $0.id == lastID }) else { return nil }
+        return lastID
+    }
+
+    // MARK: - When the menu bar icon can't be seen
+
+    /// Whether macOS hides the menu bar icon – behind the notch, or turned off in System Settings →
+    /// Menu Bar (see `MenuBarIconVisibility`).
+    var isIconHidden: Bool {
+        let window = statusItem.button?.window
+        let screen = window?.screen
+        return MenuBarIconVisibility.isHidden(
+            windowVisible: window?.occlusionState.contains(.visible) ?? false,
+            iconFrame: window?.frame,
+            screenFrame: screen?.frame,
+            notchGap: MenuBarIconVisibility.notchGap(left: screen?.auxiliaryTopLeftArea,
+                                                     right: screen?.auxiliaryTopRightArea))
+    }
+
+    /// Opening Drip Remote again while it runs – from Spotlight, Finder or the Dock – always shows
+    /// something, so a hidden icon doesn't leave the app unreachable.
+    func handleReopen() {
+        switch ReopenAction.decide(remoteIsOpen: panel?.isVisible == true,
+                                   lastPairedDeviceNearby: lastPairedDeviceNearby) {
+        case .focusRemote:
+            NSApp.activate(ignoringOtherApps: true)
+            panel?.makeKeyAndOrderFront(nil)
+        case .openRemote(let deviceID):
+            openRemote(for: deviceID)
+        case .showDevices:
+            showDevices()
+        }
+    }
+
+    /// The device menu – where pairing starts – under the icon, or at the top centre of the screen
+    /// when the icon is hidden.
+    func showDevices() {
+        guard isIconHidden, let screen = NSScreen.main else { return showMenu() }
+        NSApp.activate(ignoringOtherApps: true)
+        let topLeft = MenuBarIconVisibility.fallbackTopLeft(visibleFrame: screen.visibleFrame,
+                                                            width: DS.ControlSize.menuItemWidth)
+        menu.popUp(positioning: nil, at: topLeft, in: nil)
+    }
+
+    /// Pop the status menu by temporarily attaching it, then detach on close
+    /// (see `menuDidClose`) so the next click routes back to `statusItemClicked`.
+    private func showMenu() {
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+    }
+
+    private func startObserving() {
+        observation = Timer.publish(every: 0.3, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.handleStateChange()
+            }
+    }
+
+    private var lastKnownStatus: ConnectionStatus = .disconnected
+    private var lastKnownDeviceCount: Int = 0
+    private var hasPairedDevice = false
+    private var pairingItem: PairingMenuItem?
+
+    private func handleStateChange() {
+        let currentStatus = manager.connectionStatus
+        let currentDeviceCount = manager.discoveredDevices.count
+
+        // Fulfill pending openRemote when the target device is discovered
+        if let pendingID = pendingOpenDeviceID,
+           let device = manager.discoveredDevices.first(where: { $0.id == pendingID }) {
+            pendingOpenDeviceID = nil
+            connectAndShow(device)
+            return
+        }
+
+        guard currentStatus != lastKnownStatus || currentDeviceCount != lastKnownDeviceCount else { return }
+        lastKnownStatus = currentStatus
+        lastKnownDeviceCount = currentDeviceCount
+        if currentStatus != .pairing { pairingItem = nil }
+
+        switch currentStatus {
+        case .disconnected:
+            dismissPanel()
+            rebuildMenu()
+        case .connecting:
+            if panel != nil {
+                // Panel already open — SwiftUI will update content
+            } else {
+                rebuildMenu()
+            }
+        case .pairing:
+            rebuildMenu()
+        case .localNetworkDenied, .error:
+            rebuildMenu()
+            surfaceRemoteForError()
+        case .connected:
+            menu.cancelTracking()
+            // Island style: the panel exists from the moment we start connecting, so a
+            // reconnect (after sleep, a network blip) must not pull command center or the
+            // remote onto the screen by itself.
+            if panel == nil || !islandStyleRemote { showPanel() }
+        }
+    }
+
+    // MARK: - Menu building
+
+    private func rebuildMenu() {
+        menu.removeAllItems()
+
+        switch manager.connectionStatus {
+        case .disconnected:
+            buildDeviceList()
+        case .connecting:
+            if panel != nil { return }
+            let item = NSMenuItem(title: "Connecting...", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            // Pairing stays here until the Apple TV shows its PIN – this is the way out if it never does.
+            menu.addItem(createActionItem(title: "Cancel") { [weak self] in
+                self?.manager.disconnect()
+            })
+        case .localNetworkDenied:
+            for line in ["Local network access is off", "Turn on Drip Remote under Local Network"] {
+                let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(createActionItem(title: "Open Privacy & Security...", symbolName: "hand.raised") {
+                SystemSettingsPane.privacySecurity.open()
+            })
+            menu.addItem(createActionItem(title: "Cancel") { [weak self] in
+                self?.manager.disconnect()
+            })
+        case .pairing:
+            // Reused across menu reopens so typed digits and the post-submit
+            // spinner survive – tvOS 27 can take a while to confirm the PIN.
+            let pairing = pairingItem ?? PairingMenuItem(manager: manager)
+            pairingItem = pairing
+            menu.addItem(pairing)
+        case .error(let message):
+            let errorItem = NSMenuItem(title: message, action: nil, keyEquivalent: "")
+            errorItem.isEnabled = false
+            menu.addItem(errorItem)
+            menu.addItem(NSMenuItem.separator())
+            let dismissItem = createActionItem(title: "Dismiss") { [weak self] in
+                self?.manager.disconnect()
+            }
+            menu.addItem(dismissItem)
+        case .connected:
+            buildDeviceList()
+        }
+
+        switch manager.connectionStatus {
+        case .pairing, .connecting:
+            break
+        default:
+            menu.addItem(NSMenuItem.separator())
+            if case .connected = manager.connectionStatus {
+                menu.addItem(createActionItem(title: "Disconnect", symbolName: "xmark.circle") { [weak self] in
+                    self?.manager.disconnect()
+                })
+            }
+            menu.addItem(createActionItem(title: "Settings...", symbolName: "gearshape") { [weak self] in
+                self?.openSettings()
+            })
+            let loginItem = createCheckboxItem(
+                title: "Launch at login",
+                isOn: SMAppService.mainApp.status == .enabled
+            ) {
+                do {
+                    if SMAppService.mainApp.status == .enabled {
+                        try SMAppService.mainApp.unregister()
+                    } else {
+                        try SMAppService.mainApp.register()
+                    }
+                } catch {
+                    log.error("Failed to toggle login item: \(error.localizedDescription)")
+                }
+            }
+            menu.addItem(loginItem)
+            menu.addItem(createCheckboxItem(title: "Show in Dock", isOn: DockIcon.isOn) {
+                DockIcon.set(!DockIcon.isOn)
+            })
+            let quitItem = createActionItem(title: "Quit", symbolName: "power") {
+                NSApplication.shared.terminate(nil)
+            }
+            menu.addItem(quitItem)
+        }
+    }
+
+    private func buildDeviceList() {
+        hasPairedDevice = false
+        if manager.discoveredDevices.isEmpty {
+            let scanning = NSMenuItem(title: "Scanning for devices...", action: nil, keyEquivalent: "")
+            scanning.isEnabled = false
+            menu.addItem(scanning)
+        } else {
+            let sorted = manager.discoveredDevices.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            for device in sorted {
+                let isPaired = KeychainStorage.load(for: device.id) != nil
+                if isPaired { hasPairedDevice = true }
+                let item = createDeviceItem(device: device, isPaired: isPaired)
+                menu.addItem(item)
+            }
+        }
+    }
+
+    private func createDeviceItem(device: AppleTVDevice, isPaired: Bool) -> NSMenuItem {
+        let height = DS.ControlSize.menuItemHeight
+        let width = DS.ControlSize.menuItemWidth
+
+        let containerView = HighlightingMenuItemView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        containerView.closesMenuOnAction = isPaired
+
+        // Icon (green for paired devices)
+        let iconSize = DS.ControlSize.iconMedium
+        let iconY = (height - iconSize) / 2
+        let iconView = NSImageView(frame: NSRect(x: DS.Spacing.md, y: iconY, width: iconSize, height: iconSize))
+        iconView.image = NSImage(systemSymbolName: "appletv.fill", accessibilityDescription: nil)
+        iconView.contentTintColor = isPaired ? .systemGreen : DS.Colors.iconForeground
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        containerView.addSubview(iconView)
+
+        // Hotkey (right-aligned, for paired devices with assigned hotkey)
+        let rightPadding: CGFloat = 20
+        var labelRightEdge = width - rightPadding
+        if isPaired, let keys = HotkeyStorage.load(deviceID: device.id) {
+            let hotkeyFont = NSFont.menuFont(ofSize: 13)
+            let hotkeyStr = keys.displayString
+            let hotkeyAttr = NSAttributedString(string: hotkeyStr, attributes: [.font: hotkeyFont])
+            let hotkeyTextSize = hotkeyAttr.size()
+            let hotkeyW = ceil(hotkeyTextSize.width) + 4
+            let hotkeyX = width - rightPadding - hotkeyW
+            let hotkeyY = (height - hotkeyTextSize.height) / 2
+
+            let hotkeyLabel = NSTextField(labelWithString: hotkeyStr)
+            hotkeyLabel.frame = NSRect(x: hotkeyX, y: hotkeyY, width: hotkeyW, height: hotkeyTextSize.height)
+            hotkeyLabel.font = hotkeyFont
+            hotkeyLabel.textColor = .tertiaryLabelColor
+            containerView.addSubview(hotkeyLabel)
+            labelRightEdge = hotkeyX - DS.Spacing.sm
+        }
+
+        // Name label
+        let labelX = DS.Spacing.md + iconSize + DS.Spacing.sm
+        let labelY = (height - 17) / 2
+        let labelWidth = labelRightEdge - labelX
+        let nameLabel = NSTextField(labelWithString: device.name)
+        nameLabel.frame = NSRect(x: labelX, y: labelY, width: labelWidth, height: 17)
+        nameLabel.font = DS.Typography.label
+        nameLabel.textColor = DS.Colors.foreground
+        nameLabel.lineBreakMode = .byTruncatingTail
+        containerView.addSubview(nameLabel)
+
+        containerView.onAction = { [weak self] in
+            self?.openRemote(for: device.id)
+        }
+
+        let item = NSMenuItem(title: device.name, action: nil, keyEquivalent: "")
+        item.view = containerView
+        return item
+    }
+
+    private func createActionItem(title: String, symbolName: String? = nil, action: @escaping () -> Void) -> NSMenuItem {
+        let height = DS.ControlSize.menuItemHeight
+        let width = DS.ControlSize.menuItemWidth
+
+        let containerView = HighlightingMenuItemView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+
+        var labelX = DS.Spacing.md
+        if let symbolName {
+            let iconSize = DS.ControlSize.iconMedium
+            let iconY = (height - iconSize) / 2
+            let iconView = NSImageView(frame: NSRect(x: DS.Spacing.md, y: iconY, width: iconSize, height: iconSize))
+            iconView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+            iconView.contentTintColor = DS.Colors.iconForeground
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            containerView.addSubview(iconView)
+            labelX = DS.Spacing.md + iconSize + DS.Spacing.sm
+        }
+
+        let labelY = (height - 17) / 2
+        let labelWidth = width - labelX - DS.Spacing.md
+        let nameLabel = NSTextField(labelWithString: title)
+        nameLabel.frame = NSRect(x: labelX, y: labelY, width: labelWidth, height: 17)
+        nameLabel.font = DS.Typography.label
+        nameLabel.textColor = DS.Colors.foreground
+        nameLabel.lineBreakMode = .byTruncatingTail
+        containerView.addSubview(nameLabel)
+
+        containerView.onAction = action
+
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.view = containerView
+        return item
+    }
+
+    private func createCheckboxItem(title: String, isOn: Bool, action: @escaping () -> Void) -> NSMenuItem {
+        let height = DS.ControlSize.menuItemHeight
+        let width = DS.ControlSize.menuItemWidth
+
+        let containerView = HighlightingMenuItemView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+
+        let iconSize = DS.ControlSize.iconMedium
+        let checkX = DS.Spacing.md
+        let checkY = (height - iconSize) / 2
+        let checkmark = NSTextField(labelWithString: isOn ? "✓" : "")
+        checkmark.frame = NSRect(x: checkX, y: checkY, width: iconSize, height: iconSize)
+        checkmark.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        checkmark.textColor = DS.Colors.foreground
+        checkmark.alignment = .center
+        containerView.addSubview(checkmark)
+
+        let labelX = DS.Spacing.md + iconSize + DS.Spacing.sm
+        let labelY = (height - 17) / 2
+        let labelWidth = width - labelX - DS.Spacing.md
+        let nameLabel = NSTextField(labelWithString: title)
+        nameLabel.frame = NSRect(x: labelX, y: labelY, width: labelWidth, height: 17)
+        nameLabel.font = DS.Typography.label
+        nameLabel.textColor = DS.Colors.foreground
+        nameLabel.lineBreakMode = .byTruncatingTail
+        containerView.addSubview(nameLabel)
+
+        containerView.onAction = action
+
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.view = containerView
+        return item
+    }
+
+    // MARK: - Panel
+
+    private func showPanel() {
+        if panel != nil {
+            // Never silently do nothing: an existing panel may be on another desktop.
+            bringPanelHere()
+            return
+        }
+
+        let panelContent = PanelContentView()
+            .environment(manager)
+            .environment(iconLoader)
+
+        let hostingView = ArrowCursorHostingView(rootView: panelContent)
+        hostingView.safeAreaRegions = []
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Vibrancy view as the contentView itself
+        let cornerRadius: CGFloat = 16
+        let edgeLength = 2.0 * cornerRadius + 1.0
+        let maskImage = NSImage(size: NSSize(width: edgeLength, height: edgeLength), flipped: false) { rect in
+            let bezierPath = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+            NSColor.black.set()
+            bezierPath.fill()
+            return true
+        }
+        maskImage.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius, bottom: cornerRadius, right: cornerRadius)
+        maskImage.resizingMode = .stretch
+        
+        let effectView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: TouchMode.shared.panelWidth, height: 400))
+        effectView.material = .menu
+        effectView.state = .active
+        effectView.maskImage = maskImage
+        // Island style (command center is the main interface): the remote is black, drawn
+        // entirely by the view so it can drip out of the island – no system material behind it.
+        islandStyleRemote = UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true
+        TouchMode.shared.islandStyle = islandStyleRemote
+        let vibrancy: NSView = islandStyleRemote ? NSView(frame: effectView.frame) : effectView
+        vibrancy.addSubview(hostingView)
+
+        NSLayoutConstraint.activate([
+            hostingView.topAnchor.constraint(equalTo: vibrancy.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: vibrancy.bottomAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: vibrancy.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: vibrancy.trailingAnchor),
+        ])
+
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: TouchMode.shared.panelWidth, height: 400),
+            styleMask: [.nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = vibrancy
+        TouchMode.shared.attachSniffer(to: vibrancy)
+        // Island style always floats: it has to stay joined to the island, above other windows.
+        let alwaysOnTop = islandStyleRemote || (UserDefaults.standard.object(forKey: "alwaysOnTop") as? Bool ?? true)
+        panel.isFloatingPanel = alwaysOnTop
+        panel.level = alwaysOnTop ? .statusBar : .normal
+        panel.hidesOnDeactivate = false
+        // .moveToActiveSpace: ordering the panel front pulls it onto the desktop
+        // the user is on, instead of switching away or staying invisible.
+        panel.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
+        if !alwaysOnTop {
+            panel.styleMask.remove(.nonactivatingPanel)
+            panel.syncActivationBehavior()
+        }
+        panel.isMovableByWindowBackground = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
+        panel.hasShadow = !islandStyleRemote
+        if islandStyleRemote { panel.appearance = NSAppearance(named: .darkAqua) }
+
+        // Command center is the main show: when opening into it, the small remote is
+        // created invisibly (it still needs ordering once so its position is set) and
+        // only appears when asked for with the island widget's remote button.
+        let opensInCommandCenter = UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true
+        // One source of truth for "the remote is out": false while it is put away.
+        RemoteReveal.shared.revealed = !opensInCommandCenter
+        if opensInCommandCenter { panel.alphaValue = 0 }
+
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+
+        // Position after makeKeyAndOrderFront — AppKit constrains the
+        // frame during ordering for .statusBar level panels, so we must
+        // set the origin after the window is on screen.
+        if let origin = savedPanelOrigin(panelHeight: panel.frame.height), isPointOnScreen(origin, panelSize: panel.frame.size) {
+            log.info("showPanel: using saved origin (\(origin.x), \(origin.y))")
+            panel.setFrameOrigin(origin)
+        } else if !isIconHidden, let buttonFrame = statusItem.button?.window?.frame {
+            let x = buttonFrame.midX - panel.frame.width / 2
+            let y = buttonFrame.minY - panel.frame.height
+            log.info("showPanel: using status bar fallback (\(x), \(y))")
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        } else if let screen = NSScreen.main {
+            // The icon is hidden (notch, or turned off in System Settings → Menu Bar).
+            let topLeft = MenuBarIconVisibility.fallbackTopLeft(visibleFrame: screen.visibleFrame, width: panel.frame.width)
+            log.info("showPanel: icon hidden, using top centre (\(topLeft.x), \(topLeft.y))")
+            panel.setFrameOrigin(NSPoint(x: topLeft.x, y: topLeft.y - panel.frame.height))
+        } else {
+            log.warning("showPanel: no saved origin and no status bar button frame")
+        }
+
+        self.panel = panel
+        self.panelHostingView = hostingView
+        self.panelDeviceID = manager.connectedDeviceID
+        installKeyboardMonitor()
+
+        // Touch layout: snap to the right edge, and follow touch ↔ pointer changes.
+        TouchMode.shared.syncBaseline()
+        TouchMode.shared.onChange = { [weak self] in self?.applyPanelLayout(animated: true) }
+        if TouchMode.shared.isTouch { applyPanelLayout(animated: false) }
+
+        // Pinch out on the small remote expands it into command center.
+        let pinch = NSMagnificationGestureRecognizer(target: self, action: #selector(handlePanelPinch(_:)))
+        vibrancy.addGestureRecognizer(pinch)
+
+        // Command center is the primary interface: open straight into it.
+        if opensInCommandCenter {
+            enterCommandMode()      // orders the remote out
+            panel.alphaValue = 1
+        }
+
+        // Observe "Always on top" toggle changes while panel is open
+        var lastOnTop = alwaysOnTop
+        alwaysOnTopObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // This fires for every defaults write. Only act when "Always on top" itself
+            // changed – otherwise any unrelated setting would re-order the remote to the front.
+            guard let self, let panel = self.panel, !self.islandStyleRemote else { return }
+            let onTop = UserDefaults.standard.object(forKey: "alwaysOnTop") as? Bool ?? true
+            guard onTop != lastOnTop else { return }
+            lastOnTop = onTop
+            panel.isFloatingPanel = onTop
+            panel.level = onTop ? .statusBar : .normal
+            if onTop {
+                panel.styleMask.insert(.nonactivatingPanel)
+            } else {
+                panel.styleMask.remove(.nonactivatingPanel)
+            }
+            panel.syncActivationBehavior()
+            if !onTop {
+                NSApp.activate(ignoringOtherApps: true)
+                panel.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    /// Show the already-open remote on the current desktop, in front.
+    private func bringPanelHere() {
+        guard let panel else { return }
+        // Already connected: the menu bar icon / hotkey leads to command center, not the
+        // small remote, unless the remote is what's currently on screen.
+        if commandMode.isActive { return }
+        if !panel.isVisible, islandWidget.isVisible {
+            enterCommandMode()
+            return
+        }
+        if islandStyleRemote {
+            showIslandRemote()
+            return
+        }
+        if !panel.isOnActiveSpace || !panel.isVisible {
+            log.error("bringPanelHere: panel was off this desktop (onActiveSpace=\(panel.isOnActiveSpace, privacy: .public) visible=\(panel.isVisible, privacy: .public))")
+        }
+        RemoteReveal.shared.revealed = true
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        if !isPointOnScreen(panel.frame.origin, panelSize: panel.frame.size), let screen = NSScreen.main {
+            let topLeft = MenuBarIconVisibility.fallbackTopLeft(visibleFrame: screen.visibleFrame, width: panel.frame.width)
+            panel.setFrameOrigin(NSPoint(x: topLeft.x, y: topLeft.y - panel.frame.height))
+        }
+    }
+
+    // MARK: - Command mode
+
+    /// Full-screen black control panel; the small remote hides while it's up.
+    private func enterCommandMode() {
+        guard panel != nil, !commandMode.isActive else { return }
+        releaseHeldKey(reason: "command mode")
+        let screen = panel?.screen
+        panel?.orderOut(nil)
+        if islandStyleRemote { RemoteReveal.shared.revealed = false }
+        islandWidget.remoteIsOpen = false
+        // Drip out of whatever the island looks like right now: open card or closed pill.
+        let widgetOnScreen = islandWidget.isVisible
+        let fromExpanded = widgetOnScreen && islandWidget.isExpanded
+        // Leave the widget up while the drop forms and falls, so it keeps showing its own
+        // content; take it down once the flood has covered it.
+        islandHideToken += 1
+        let token = islandHideToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.7) { [weak self] in
+            guard let self, self.islandHideToken == token, self.commandMode.isActive else { return }
+            self.islandWidget.hide()
+        }
+        TouchMode.shared.commandModeActive = true
+        commandMode.show(preferredScreen: screen, fromExpandedIsland: fromExpanded, widgetOnScreen: widgetOnScreen)
+    }
+
+    @objc private func handlePanelPinch(_ pinch: NSMagnificationGestureRecognizer) {
+        guard pinch.state == .changed || pinch.state == .ended, pinch.magnification > 0.25 else { return }
+        enterCommandMode()
+    }
+
+    private func exitCommandMode() {
+        guard commandMode.isActive else { return }
+        releaseHeldKey(reason: "command mode")
+        islandHideToken += 1        // cancel a pending "hide the widget" from the drip in
+        islandWidget.hide()
+        commandMode.animateOut { [weak self] in
+            guard let self else { return }
+            TouchMode.shared.commandModeActive = false
+            // It has just retracted into the island: leave the widget there. The small
+            // remote stays hidden until asked for (the widget's remote button).
+            guard self.panel != nil else { return }
+            self.islandWidget.show(on: self.commandMode.screen)
+            switch self.manager.connectionStatus {
+            case .error, .localNetworkDenied:
+                self.showIslandRemote()         // errors are shown by the small remote
+            default:
+                break
+            }
+            self.afterCommandCenterExit?()
+            self.afterCommandCenterExit = nil
+        }
+    }
+
+    // MARK: - Touch layout
+
+    /// The panel's frame when snapped to the right edge of its screen.
+    private func dockedFrame(width: CGFloat, height: CGFloat, panel: NSPanel) -> NSRect {
+        let visible = (panel.screen ?? NSScreen.main)?.visibleFrame ?? panel.frame
+        let margin: CGFloat = 8
+        let h = min(height, visible.height - margin * 2)
+        return NSRect(x: visible.maxX - width - margin, y: visible.maxY - h - margin, width: width, height: h)
+    }
+
+    /// Resize for the current layout and snap to the right edge (touch) or back
+    /// to where the panel was (pointer).
+    private func applyPanelLayout(animated: Bool) {
+        // Let SwiftUI lay out the new width first, then measure.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let panel = self.panel else { return }
+            let touch = TouchMode.shared.isTouch
+            let width = TouchMode.shared.panelWidth
+            panel.contentView?.layoutSubtreeIfNeeded()
+            let fitted = self.panelHostingView?.fittingSize.height ?? 0
+            let height = fitted > 50 ? fitted : panel.frame.height
+
+            let target: NSRect
+            if self.islandStyleRemote {
+                self.isDocked = false
+                target = self.islandRemoteFrame(width: width, height: height)
+            } else if touch {
+                if !self.isDocked {
+                    self.undockedTopLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+                    self.isDocked = true
+                }
+                target = self.dockedFrame(width: width, height: height, panel: panel)
+            } else {
+                self.isDocked = false
+                let topLeft = self.undockedTopLeft ?? NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+                var frame = NSRect(x: topLeft.x, y: topLeft.y - height, width: width, height: height)
+                if !self.isPointOnScreen(frame.origin, panelSize: frame.size) {
+                    frame = self.dockedFrame(width: width, height: height, panel: panel)
+                }
+                target = frame
+            }
+            self.isRedocking = true
+            panel.setFrame(target, display: true, animate: animated)
+            self.isRedocking = false
+        }
+    }
+
+    /// Island style: centred under the island, hanging just below it.
+    private func islandRemoteFrame(width: CGFloat, height: CGFloat) -> NSRect {
+        guard let screen = commandMode.screen ?? panel?.screen else {
+            return NSRect(x: 0, y: 0, width: width, height: height)
+        }
+        // Hang from whatever the island looks like now – the open card or the closed pill –
+        // tucked up behind its rounded bottom so the neck runs straight into it.
+        let source = CommandModeController.widgetRect(on: screen, expanded: islandWidget.isVisible && islandWidget.isExpanded)
+        RemoteReveal.shared.neckWidth = source.rect.width          // exactly the island's width
+        let top = screen.frame.maxY - source.rect.maxY + source.radius + 2
+        let h = min(height, top - screen.visibleFrame.minY - 8)
+        return NSRect(x: screen.frame.minX + source.rect.midX - width / 2, y: top - h, width: width, height: h)
+    }
+
+    /// Remote button on the island widget: first tap pours the remote out, second tap
+    /// draws it back into the island.
+    private func toggleIslandRemote() {
+        guard let panel else { return }
+        if panel.isVisible && RemoteReveal.shared.revealed { hideIslandRemote() } else { showIslandRemote() }
+    }
+
+    private func hideIslandRemote() {
+        guard let panel, panel.isVisible else { return }
+        RemoteReveal.shared.revealed = false
+        islandWidget.remoteIsOpen = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            // Still put away (not re-opened in the meantime): take the window down.
+            guard let panel = self?.panel, !RemoteReveal.shared.revealed else { return }
+            panel.orderOut(nil)
+        }
+    }
+
+    private func showIslandRemote() {
+        guard let panel else { return }
+        if !panel.isVisible { RemoteReveal.shared.revealed = false }     // start collapsed
+        panel.alphaValue = 1
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let fitted = panelHostingView?.fittingSize.height ?? 0
+        let frame = islandRemoteFrame(width: TouchMode.shared.panelWidth, height: fitted > 50 ? fitted : panel.frame.height)
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        isRedocking = true
+        panel.setFrame(frame, display: true)
+        isRedocking = false
+        islandWidget.remoteIsOpen = true
+        // Start the pour once the collapsed frame is on screen.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { RemoteReveal.shared.revealed = true }
+    }
+
+    /// Errors are shown by the small remote. In island style it may be put away, with only
+    /// the island widget on screen – bring it out so the error is seen. (Command center
+    /// steps back to the island by itself, and then shows the remote.)
+    private func surfaceRemoteForError() {
+        guard islandStyleRemote, let panel, !commandMode.isActive else { return }
+        guard !(panel.isVisible && RemoteReveal.shared.revealed) else { return }
+        showIslandRemote()
+    }
+
+    /// Settings can't sit above full-screen command center, so it steps back to the island first.
+    private func openSettings() {
+        if commandMode.isActive {
+            afterCommandCenterExit = { SettingsWindow.show() }
+            exitCommandMode()
+        } else {
+            SettingsWindow.show()
+        }
+    }
+
+    /// A display was added, removed or changed resolution: put everything back where it belongs.
+    private func screensChanged() {
+        commandMode.screensChanged()
+        if islandWidget.isVisible {
+            let remoteOpen = islandWidget.remoteIsOpen
+            islandWidget.hide()
+            islandWidget.show(on: commandMode.screen ?? panel?.screen)
+            islandWidget.remoteIsOpen = remoteOpen
+        }
+        if islandStyleRemote, let panel, panel.isVisible {
+            let frame = islandRemoteFrame(width: panel.frame.width, height: panel.frame.height)
+            isRedocking = true
+            panel.setFrame(frame, display: true)
+            isRedocking = false
+        }
+    }
+
+    fileprivate func panelDidResize(_ panel: NSPanel) {
+        if islandStyleRemote, !isRedocking {
+            // Keep it hanging from the island as its height changes.
+            let target = islandRemoteFrame(width: panel.frame.width, height: panel.frame.height)
+            guard abs(target.maxY - panel.frame.maxY) > 0.5 || abs(target.midX - panel.frame.midX) > 0.5 else { return }
+            isRedocking = true
+            panel.setFrame(target, display: true)
+            isRedocking = false
+            return
+        }
+        guard isDocked, !isRedocking, TouchMode.shared.isTouch else { return }
+        let target = dockedFrame(width: panel.frame.width, height: panel.frame.height, panel: panel)
+        guard abs(target.maxX - panel.frame.maxX) > 0.5 || abs(target.maxY - panel.frame.maxY) > 0.5 else { return }
+        isRedocking = true
+        panel.setFrame(target, display: true)
+        isRedocking = false
+    }
+
+    private func dismissPanel() {
+        islandWidget.hide()
+        if commandMode.isActive {
+            commandMode.close()
+            TouchMode.shared.commandModeActive = false
+        }
+        TouchMode.shared.onChange = nil
+        TouchMode.shared.islandStyle = false
+        isDocked = false
+        undockedTopLeft = nil
+        removeKeyboardMonitor()
+        if let observer = alwaysOnTopObserver {
+            NotificationCenter.default.removeObserver(observer)
+            alwaysOnTopObserver = nil
+        }
+        savePanelPosition()
+        panel?.close()
+        panel = nil
+        panelDeviceID = nil
+    }
+
+    private func savePanelPosition() {
+        guard !islandStyleRemote else { return }   // it always hangs under the island
+        guard var frame = panel?.frame else {
+            log.debug("save: no panel frame")
+            return
+        }
+        // Remember where it was before it snapped to the edge, not the docked spot.
+        if isDocked, let topLeft = undockedTopLeft {
+            frame.origin = NSPoint(x: topLeft.x, y: topLeft.y - frame.height)
+        }
+        guard let deviceID = panelDeviceID else {
+            log.debug("save: no panelDeviceID")
+            return
+        }
+        // Save top-left corner (x, maxY) — the visual anchor point.
+        // AppKit origin is bottom-left, but top-left stays stable
+        // regardless of panel height changes from SwiftUI layout.
+        let dict: [String: CGFloat] = ["x": frame.minX, "topY": frame.maxY]
+        UserDefaults.standard.set(dict, forKey: "panelOrigin_\(deviceID)")
+        log.info("save: topLeft (\(frame.minX), \(frame.maxY)) for device \(deviceID)")
+    }
+
+    private func savedPanelOrigin(panelHeight: CGFloat) -> NSPoint? {
+        guard let deviceID = manager.connectedDeviceID else {
+            log.debug("restore: no connectedDeviceID")
+            return nil
+        }
+        let key = "panelOrigin_\(deviceID)"
+        guard let dict = UserDefaults.standard.dictionary(forKey: key) else {
+            log.debug("restore: no saved value for key \(key)")
+            return nil
+        }
+        guard let x = dict["x"] as? CGFloat, let topY = dict["topY"] as? CGFloat else {
+            log.debug("restore: bad dict format: \(dict)")
+            return nil
+        }
+        // Convert top-left back to AppKit bottom-left origin
+        let origin = NSPoint(x: x, y: topY - panelHeight)
+        log.info("restore: topLeft (\(x), \(topY)) → origin (\(origin.x), \(origin.y)) for device \(deviceID)")
+        return origin
+    }
+
+    private func isPointOnScreen(_ origin: NSPoint, panelSize: NSSize) -> Bool {
+        let panelRect = NSRect(origin: origin, size: panelSize)
+        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(panelRect) }
+        log.info("onScreen check: (\(origin.x), \(origin.y)) size \(panelSize.width)x\(panelSize.height) → \(onScreen)")
+        return onScreen
+    }
+
+    private func installKeyboardMonitor() {
+        removeKeyboardMonitor()
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            // Only keys typed into the remote itself – not into the shortcuts window or Settings.
+            guard let self, let window = event.window, window.isVisible,
+                  window === self.panel || window === self.commandMode.window
+                    || window === self.islandWidget.window else { return event }
+            let handled = event.type == .keyUp ? self.handleRemoteKeyUp(event) : self.handleRemoteKeyDown(event)
+            return handled ? nil : event
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyboardMonitor = nil
+        }
+        releaseHeldKey(reason: "monitor removed")
+    }
+
+    // MARK: - Held keys
+
+    /// Back, TV, Select and Play/Pause are held for real, like on the Siri Remote:
+    /// key down sends "button down" to the Apple TV, key up sends "button up", and
+    /// tvOS itself decides between a click and a hold (hold Back → Home screen,
+    /// hold TV → Control Center, hold Select → context menu). macOS key repeat is
+    /// swallowed so a held key never turns into a burst of clicks.
+    private struct KeyHold {
+        let keyCode: UInt16
+        let button: CompanionButton
+        let start: Date
+        let watchdog: Timer
+    }
+
+    /// Never leave a button stuck down on the Apple TV if the key-up gets lost.
+    private static let maxKeyHold: TimeInterval = 8
+
+    private func beginKeyHold(_ button: CompanionButton, keyCode: UInt16) {
+        releaseHeldKey(reason: "new key")
+        let watchdog = Timer.scheduledTimer(withTimeInterval: Self.maxKeyHold, repeats: false) { [weak self] _ in
+            self?.releaseHeldKey(reason: "watchdog")
+        }
+        keyHold = KeyHold(keyCode: keyCode, button: button, start: Date(), watchdog: watchdog)
+        log.info("key: \(String(describing: button), privacy: .public) down")
+        manager.pressDown(button)
+    }
+
+    private func releaseHeldKey(reason: String) {
+        guard let hold = keyHold else { return }
+        keyHold = nil
+        hold.watchdog.invalidate()
+        let held = Date().timeIntervalSince(hold.start)
+        log.info("key: \(String(describing: hold.button), privacy: .public) up after \(held, format: .fixed(precision: 2), privacy: .public)s (\(reason, privacy: .public))")
+        manager.release(hold.button)
+    }
+
+    private func handleRemoteKeyUp(_ event: NSEvent) -> Bool {
+        guard let hold = keyHold, hold.keyCode == event.keyCode else { return false }
+        releaseHeldKey(reason: "key up")
+        return true
+    }
+
+    private func handleRemoteKeyDown(_ event: NSEvent) -> Bool {
+        guard let shortcut = RemoteShortcut.match(event) else { return false }
+        // ⌘ shortcuts work even when text input is focused; plain keys go to the field
+        if !shortcut.usesCommand && isTextInputFocused(in: event.window) { return false }
+
+        switch shortcut {
+        case .close:
+            if commandMode.isActive {
+                exitCommandMode()
+            } else if let widget = islandWidget.window, widget.isKeyWindow {
+                islandWidget.collapse()     // ⌘W on the open island closes it
+            } else if islandStyleRemote {
+                hideIslandRemote()          // back into the island; Disconnect is in the ⋯ menu
+            } else {
+                manager.disconnect()
+            }
+        case .keyboard:
+            manager.keyboardToggleCounter &+= 1
+            manager.triggerKeyboardBlink(.siri)
+        case .appSearch:
+            let key = "showAppsSearch"
+            UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: key), forKey: key)
+        case .mute:
+            manager.toggleMute()
+            manager.triggerKeyboardBlink(.siri)
+        default:
+            guard let button = shortcut.companionButton else { return false }
+            if shortcut.hasHoldAction {
+                if event.isARepeat {
+                    log.debug("key: repeat swallowed")
+                } else {
+                    beginKeyHold(button, keyCode: event.keyCode)
+                }
+            } else {
+                log.info("key: \(String(describing: button), privacy: .public) click")
+                // Arrows and volume keep key repeat: holding them scrolls / keeps changing volume.
+                manager.pressButton(button)
+                manager.triggerKeyboardBlink(button)
+            }
+        }
+        return true
+    }
+
+    /// Field editor, NSTextField or SwiftUI text in the panel has focus.
+    private func isTextInputFocused(in window: NSWindow?) -> Bool {
+        // The window the key was typed into – not some other window of ours that happens
+        // to have a text field focused.
+        var responder: NSResponder? = window?.firstResponder
+        while let current = responder {
+            if current is NSText || current is NSTextField { return true }
+            responder = current.nextResponder
+        }
+        return false
+    }
+
+    // MARK: - NSMenuDelegate
+
+    func menuWillOpen(_ menu: NSMenu) {
+        manager.refreshScanning()
+        rebuildMenu()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        // Detach so the next status-item click routes to `statusItemClicked`
+        // rather than re-opening the menu automatically.
+        statusItem.menu = nil
+    }
+}
+
+// MARK: - Panel SwiftUI content
+
+// MARK: - Key-capable panel
+
+private final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+extension NSPanel {
+    /// Sync the WindowServer activation tag after changing `.nonactivatingPanel`.
+    /// AppKit bug: toggling the style mask flag alone does not update the
+    /// underlying `kCGSPreventsActivationTagBit` tag (FB16484811).
+    func syncActivationBehavior() {
+        let prevents = styleMask.contains(.nonactivatingPanel)
+        let sel = Selector(("_setPreventsActivation:"))
+        guard let method = class_getMethodImplementation(type(of: self), sel) else { return }
+        typealias Fn = @convention(c) (AnyObject, Selector, ObjCBool) -> Void
+        let fn = unsafeBitCast(method, to: Fn.self)
+        fn(self, sel, ObjCBool(prevents))
+    }
+}
+
+// MARK: - Arrow cursor hosting view
+
+private final class ArrowCursorHostingView<Content: View>: NSHostingView<Content> {
+    override func resetCursorRects() {
+        discardCursorRects()
+        addCursorRect(bounds, cursor: .arrow)
+    }
+
+    override func addCursorRect(_ rect: NSRect, cursor: NSCursor) {
+        super.addCursorRect(rect, cursor: .arrow)
+    }
+}
+
+struct PanelMenuButton: View {
+    @Environment(AppleTVManager.self) private var manager
+    let deviceID: String
+    let onUnpair: () -> Void
+    @AppStorage("showAppsSearch") private var showAppsSearch = false
+    @AppStorage("showShortcutHints") private var showShortcutHints = false
+    @State private var showingHotkeyRecorder = false
+    @State private var currentHotkey: ShortcutKeys?
+
+    /// Things you do to this remote and this Apple TV. Preferences live in Settings.
+    var body: some View {
+        Menu {
+            Button("Open command center") {
+                NotificationCenter.default.post(name: .toggleCommandMode, object: nil)
+            }
+            Divider()
+            Toggle("Show app search", isOn: $showAppsSearch)
+                .keyboardShortcut("f", modifiers: .command)
+            Toggle("Show shortcut hints", isOn: $showShortcutHints)
+            Button("Keyboard shortcuts…") {
+                ShortcutsWindow.show(beside: NSApp.keyWindow)
+            }
+            Divider()
+            Button(hotkeyButtonTitle) {
+                showingHotkeyRecorder = true
+            }
+            if currentHotkey != nil {
+                Button("Remove hotkey", role: .destructive) {
+                    HotkeyStorage.save(deviceID: deviceID, keys: nil)
+                    currentHotkey = nil
+                }
+            }
+            Divider()
+            Button("Settings…") {
+                NotificationCenter.default.post(name: .openSettings, object: nil)
+            }
+            Divider()
+            Button("Disconnect") { manager.disconnect() }
+            Button("Unpair", role: .destructive, action: onUnpair)
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(Color.secondary.opacity(0.15))
+                    .frame(width: TouchMode.shared.isTouch ? 36 : 20, height: TouchMode.shared.isTouch ? 36 : 20)
+                Image(systemName: "ellipsis")
+                    .font(.system(size: TouchMode.shared.isTouch ? 14 : 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .popover(isPresented: $showingHotkeyRecorder) {
+            ShortcutRecorderView(deviceID: deviceID) { keys in
+                currentHotkey = keys
+                showingHotkeyRecorder = false
+            }
+        }
+        .onAppear {
+            currentHotkey = HotkeyStorage.load(deviceID: deviceID)
+        }
+    }
+
+    private var hotkeyButtonTitle: String {
+        if let keys = currentHotkey {
+            return "Change hotkey (\(keys.displayString))"
+        }
+        return "Assign hotkey..."
+    }
+}
+
+struct ShortcutRecorderView: View {
+    let deviceID: String
+    let onRecorded: (ShortcutKeys?) -> Void
+    @State private var isRecording = false
+    @State private var recordedKeys: ShortcutKeys?
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(displayText)
+                .font(.system(.title2, design: .monospaced))
+                .foregroundStyle(isRecording && recordedKeys == nil ? .secondary : .primary)
+                .frame(minWidth: 100, minHeight: 30)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.secondary.opacity(0.15))
+                .cornerRadius(8)
+
+            Text("Use ⌘, ⌥, ⌃, ⇧ with a key")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onRecorded(HotkeyStorage.load(deviceID: deviceID))
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Save") {
+                    if let keys = recordedKeys {
+                        HotkeyStorage.save(deviceID: deviceID, keys: keys)
+                    }
+                    onRecorded(recordedKeys)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(recordedKeys == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 220)
+        .background(ShortcutRecorderHelper(isRecording: $isRecording, recordedKeys: $recordedKeys))
+        .onAppear {
+            isRecording = true
+            recordedKeys = HotkeyStorage.load(deviceID: deviceID)
+        }
+        .onDisappear {
+            isRecording = false
+        }
+    }
+
+    private var displayText: String {
+        if let keys = recordedKeys {
+            return keys.displayString
+        }
+        return isRecording ? "Press keys..." : "None"
+    }
+}
+
+struct ShortcutRecorderHelper: NSViewRepresentable {
+    @Binding var isRecording: Bool
+    @Binding var recordedKeys: ShortcutKeys?
+
+    func makeNSView(context: Context) -> ShortcutRecorderNSView {
+        let view = ShortcutRecorderNSView()
+        view.onShortcutRecorded = { keys in
+            recordedKeys = keys
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: ShortcutRecorderNSView, context: Context) {
+        nsView.isRecording = isRecording
+    }
+}
+
+final class ShortcutRecorderNSView: NSView {
+    var isRecording = false
+    var onShortcutRecorded: ((ShortcutKeys) -> Void)?
+    private var monitor: Any?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            setupMonitor()
+        } else {
+            removeMonitor()
+        }
+    }
+
+    private func setupMonitor() {
+        removeMonitor()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.isRecording else { return event }
+
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            // Require at least one modifier
+            guard !modifiers.isEmpty else { return event }
+
+            // Ignore if only modifier keys pressed (no actual key)
+            let keyCode = event.keyCode
+            let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63] // Cmd, Shift, Option, Ctrl variants
+            if modifierKeyCodes.contains(keyCode) { return event }
+
+            let keys = ShortcutKeys(modifiers: modifiers.rawValue, keyCode: keyCode)
+            DispatchQueue.main.async {
+                self.onShortcutRecorded?(keys)
+            }
+            return nil
+        }
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    deinit {
+        removeMonitor()
+    }
+}
+
+struct PanelCloseButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color.secondary.opacity(0.2))
+                    .frame(width: TouchMode.shared.isTouch ? 36 : 28, height: TouchMode.shared.isTouch ? 36 : 28)
+                Image(systemName: "xmark")
+                    .font(.system(size: TouchMode.shared.isTouch ? 14 : 12, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help("Close remote (⌘W)")
+    }
+}
+
+struct PanelContentView: View {
+    @Environment(AppleTVManager.self) private var manager
+    /// Fixed when the panel is created; changing the setting applies on the next connection.
+    private var islandStyle: Bool { TouchMode.shared.islandStyle }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            switch manager.connectionStatus {
+            case .connecting, .connected:
+                RemoteControlView()
+            case .localNetworkDenied:
+                LocalNetworkDeniedView()
+            case .error(let message):
+                ErrorView(message: message)
+            default:
+                EmptyView()
+            }
+        }
+        .frame(width: TouchMode.shared.panelWidth)
+        .modifier(IslandRemoteStyle(enabled: islandStyle, width: TouchMode.shared.panelWidth))
+    }
+}
+
+/// Whether the island-style remote is poured out (true) or drawn back into the island.
+@Observable
+final class RemoteReveal {
+    static let shared = RemoteReveal()
+    var revealed = true
+    /// Width of the island shape the remote hangs from (pill or open card).
+    var neckWidth: CGFloat = 187
+}
+
+extension Notification.Name {
+    /// The remote's ✕ in island style: draw it back into the island (don't disconnect).
+    static let putAwayIslandRemote = Notification.Name("dripremote.putAwayIslandRemote")
+}
+
+/// Island style for the small remote: black, outline controls, red when "Red on black"
+/// is on. It stays joined to the island by a neck, and pours out of / back into it.
+private struct IslandRemoteStyle: ViewModifier {
+    let enabled: Bool
+    let width: CGFloat
+
+    func body(content: Content) -> some View {
+        if enabled {
+            // Always white on black: red is for full-screen command center only.
+            content
+                .padding(.top, RemotePour.neckHeight)
+                .environment(\.oledControls, true)
+                .background(Color.black)
+                .clipShape(RemotePour(neckWidth: RemoteReveal.shared.neckWidth,
+                                      progress: RemoteReveal.shared.revealed ? 1 : 0))
+                .animation(.smooth(duration: 0.35), value: RemoteReveal.shared.neckWidth)
+                .animation(.smooth(duration: RemoteReveal.shared.revealed ? 0.7 : 0.45), value: RemoteReveal.shared.revealed)
+                .preferredColorScheme(.dark)
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - NSWindowDelegate
+
+extension AppController: NSWindowDelegate {
+    func windowDidResignKey(_ notification: Notification) {
+        // Key-up goes to whichever window is key now – let go of the button.
+        if (notification.object as? NSPanel) === panel { releaseHeldKey(reason: "panel lost focus") }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        if let resized = notification.object as? NSPanel, resized === panel { panelDidResize(resized) }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if (notification.object as? NSPanel) === panel {
+            TouchMode.shared.onChange = nil
+        TouchMode.shared.islandStyle = false
+            isDocked = false
+            islandWidget.hide()
+            savePanelPosition()
+            if manager.connectionStatus != .disconnected {
+                manager.disconnect()
+            }
+            panel = nil
+            panelDeviceID = nil
+        }
+    }
+}
+
+// MARK: - Pairing menu item
+
+final class PairingMenuItem: NSMenuItem {
+
+    private let manager: AppleTVManager
+    private var digits: [Int?] = [nil, nil, nil, nil]
+    private var digitLabels: [NSTextField] = []
+    private var digitBoxes: [NSView] = []
+    private weak var containerView: PairingContainerView?
+    private weak var titleLabel: NSTextField?
+    private weak var spinner: NSProgressIndicator?
+    private var isSubmitted = false
+
+    init(manager: AppleTVManager) {
+        self.manager = manager
+        super.init(title: "Pairing", action: nil, keyEquivalent: "")
+        self.view = buildView()
+    }
+
+    required init(coder: NSCoder) {
+        fatalError()
+    }
+
+    private var currentIndex: Int {
+        digits.firstIndex(where: { $0 == nil }) ?? 4
+    }
+
+    private func buildView() -> NSView {
+        let width = DS.ControlSize.menuItemWidth
+        let padding = DS.Spacing.lg
+
+        // Layout
+        let digitBoxSize: CGFloat = 44
+        let digitBoxSpacing: CGFloat = DS.Spacing.sm
+        let allDigitsWidth = digitBoxSize * 4 + digitBoxSpacing * 3
+        let titleHeight: CGFloat = 17
+        let closeButtonSize: CGFloat = 20
+        let topPadding = DS.Spacing.md
+        let afterTitle = DS.Spacing.md
+        let bottomPadding = DS.Spacing.lg
+
+        let totalHeight = topPadding + titleHeight + afterTitle + digitBoxSize + bottomPadding
+
+        let container = PairingContainerView(
+            frame: NSRect(x: 0, y: 0, width: width, height: totalHeight),
+            onDigit: { [weak self] digit in self?.enterDigit(digit) },
+            onBackspace: { [weak self] in self?.backspace() }
+        )
+        containerView = container
+
+        // Title
+        let titleY = totalHeight - topPadding - titleHeight
+        let title = NSTextField(labelWithString: "Enter PIN from your Apple TV")
+        title.frame = NSRect(x: padding, y: titleY, width: width - padding * 2 - closeButtonSize - DS.Spacing.sm, height: titleHeight)
+        title.font = DS.Typography.labelMedium
+        title.textColor = DS.Colors.foreground
+        container.addSubview(title)
+        titleLabel = title
+
+        // Close (X) button — top right
+        let closeX = width - padding - closeButtonSize
+        let closeY = titleY + (titleHeight - closeButtonSize) / 2
+        let closeButton = CloseButton(frame: NSRect(x: closeX, y: closeY, width: closeButtonSize, height: closeButtonSize))
+        closeButton.onPress = { [weak self] in
+            self?.manager.disconnect()
+        }
+        container.addSubview(closeButton)
+
+        // Digit boxes — centered
+        let digitsY = titleY - afterTitle - digitBoxSize
+        let digitsX = (width - allDigitsWidth) / 2
+        let digitBoxBg = NSColor(name: nil) { $0.isDark ? NSColor(white: 0.22, alpha: 1) : NSColor(white: 0.82, alpha: 1) }
+        let digitBoxBorder = NSColor(name: nil) { $0.isDark ? NSColor(white: 0.40, alpha: 1) : NSColor(white: 0.60, alpha: 1) }
+        let digitBoxFocusBorder = NSColor(name: nil) { $0.isDark ? NSColor(white: 0.70, alpha: 1) : NSColor(white: 0.30, alpha: 1) }
+
+        for i in 0..<4 {
+            let boxX = digitsX + CGFloat(i) * (digitBoxSize + digitBoxSpacing)
+            let box = DigitBoxView(frame: NSRect(x: boxX, y: digitsY, width: digitBoxSize, height: digitBoxSize))
+            box.bgColor = digitBoxBg
+            box.borderColor = digitBoxBorder
+            box.focusBorderColor = digitBoxFocusBorder
+            container.addSubview(box)
+            digitBoxes.append(box)
+
+            let labelHeight: CGFloat = 22
+            let labelY = (digitBoxSize - labelHeight) / 2
+            let label = NSTextField(labelWithString: "")
+            label.frame = NSRect(x: 0, y: labelY, width: digitBoxSize, height: labelHeight)
+            label.font = NSFont.monospacedDigitSystemFont(ofSize: 18, weight: .semibold)
+            label.textColor = DS.Colors.foreground
+            label.alignment = .center
+            box.addSubview(label)
+            digitLabels.append(label)
+        }
+
+        let spinnerSize: CGFloat = 24
+        let spinner = NSProgressIndicator(frame: NSRect(
+            x: (width - spinnerSize) / 2,
+            y: digitsY + (digitBoxSize - spinnerSize) / 2,
+            width: spinnerSize,
+            height: spinnerSize
+        ))
+        spinner.style = .spinning
+        spinner.isDisplayedWhenStopped = false
+        container.addSubview(spinner)
+        self.spinner = spinner
+
+        updateDigitDisplay()
+        return container
+    }
+
+    func enterDigit(_ digit: Int) {
+        guard !isSubmitted, currentIndex < 4 else { return }
+        digits[currentIndex] = digit
+        updateDigitDisplay()
+        if currentIndex == 4 {
+            isSubmitted = true
+            showSubmitted()
+            let pin = digits.compactMap { $0 }.map(String.init).joined()
+            manager.submitPIN(pin)
+        }
+    }
+
+    /// Lock the PIN while the Apple TV verifies it, which can take a while.
+    private func showSubmitted() {
+        titleLabel?.stringValue = "Pairing with Apple TV…"
+        digitBoxes.forEach { $0.alphaValue = 0.3 }
+        spinner?.startAnimation(nil)
+    }
+
+    func backspace() {
+        let idx = currentIndex - 1
+        guard !isSubmitted, idx >= 0 else { return }
+        digits[idx] = nil
+        updateDigitDisplay()
+    }
+
+    private func updateDigitDisplay() {
+        for (i, label) in digitLabels.enumerated() {
+            label.stringValue = digits[i].map(String.init) ?? ""
+        }
+        for (i, box) in digitBoxes.enumerated() {
+            if let digitBox = box as? DigitBoxView {
+                digitBox.isFocused = i == currentIndex
+                digitBox.needsDisplay = true
+            }
+        }
+    }
+}
+
+// MARK: - Digit box
+
+private final class DigitBoxView: NSView {
+
+    var bgColor: NSColor = .gray
+    var borderColor: NSColor = .darkGray
+    var focusBorderColor: NSColor = .black
+    var isFocused = false
+
+    override func draw(_ dirtyRect: NSRect) {
+        bgColor.setFill()
+        let path = NSBezierPath(roundedRect: bounds, xRadius: DS.Radius.md, yRadius: DS.Radius.md)
+        path.fill()
+
+        let strokeColor = isFocused ? focusBorderColor : borderColor
+        strokeColor.setStroke()
+        let strokePath = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: DS.Radius.md, yRadius: DS.Radius.md)
+        strokePath.lineWidth = 2
+        strokePath.stroke()
+    }
+}
+
+// MARK: - Pairing container (captures keyboard)
+
+private final class PairingContainerView: NSView {
+
+    var onDigit: ((Int) -> Void)?
+    var onBackspace: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    init(frame: NSRect, onDigit: @escaping (Int) -> Void, onBackspace: @escaping () -> Void) {
+        self.onDigit = onDigit
+        self.onBackspace = onBackspace
+        super.init(frame: frame)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.window?.makeFirstResponder(self)
+            }
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard let chars = event.characters else { return }
+        for ch in chars {
+            if let digit = ch.wholeNumberValue {
+                onDigit?(digit)
+            } else if ch == "\u{7F}" || ch == "\u{08}" {
+                onBackspace?()
+            }
+        }
+    }
+}
+
+// MARK: - Close button (X)
+
+private final class CloseButton: NSView {
+
+    var onPress: (() -> Void)?
+    private var isHovered = false
+    private var trackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea { removeTrackingArea(existing) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) {
+            enclosingMenuItem?.menu?.cancelTracking()
+            onPress?()
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // Circle background
+        let circleBg: NSColor = isHovered
+            ? DS.Colors.muted
+            : DS.Colors.secondary
+        circleBg.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+
+        // X mark
+        let inset: CGFloat = 6
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: inset, y: inset))
+        path.line(to: NSPoint(x: bounds.width - inset, y: bounds.height - inset))
+        path.move(to: NSPoint(x: bounds.width - inset, y: inset))
+        path.line(to: NSPoint(x: inset, y: bounds.height - inset))
+        path.lineWidth = 1.5
+        path.lineCapStyle = .round
+        DS.Colors.mutedForeground.setStroke()
+        path.stroke()
+    }
+}
