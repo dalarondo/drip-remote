@@ -171,10 +171,11 @@ struct IslandWidgetView: View {
                     if state.remoteIsOpen { onRemote() } else { state.expanded = true }
                 }
             Spacer().frame(width: islandSize.width)
-            Image(systemName: isPlaying ? "waveform" : "pause.fill")
+            // A keyboard here means the Apple TV is waiting for text.
+            Image(systemName: manager.keyboardFocused ? "keyboard" : (isPlaying ? "waveform" : "pause.fill"))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.85))
-                .symbolEffect(.variableColor.iterative, isActive: isPlaying)
+                .symbolEffect(.variableColor.iterative, isActive: isPlaying && !manager.keyboardFocused)
                 .frame(width: ear)
         }
         .frame(height: islandSize.height)

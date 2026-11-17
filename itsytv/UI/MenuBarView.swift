@@ -195,6 +195,20 @@ struct RemoteControlView: View {
                 beginDictation(in: NSApp.keyWindow)
             }
         }
+        // The Apple TV reports when a text field gains or loses focus: open the text box
+        // by itself, and close it again when the field goes away.
+        .onChange(of: manager.keyboardFocused) { _, focused in
+            // Only when this remote is what's on screen – never steal focus while it's put away.
+            guard !TouchMode.shared.commandModeActive, RemoteReveal.shared.revealed else { return }
+            if focused {
+                selectedTab = .remote
+                showingKeyboard = true
+            } else if showingKeyboard {
+                showingKeyboard = false
+                keyboardText = ""
+                manager.resetTextInputState()
+            }
+        }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in
             guard !TouchMode.shared.commandModeActive else { return }
             showingKeyboard.toggle()

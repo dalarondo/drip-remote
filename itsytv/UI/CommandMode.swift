@@ -827,6 +827,17 @@ struct CommandModeView: View {
             }
         }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in toggleKeyboard() }
+        // The Apple TV reports when a text field gains or loses focus: open the text box
+        // by itself (which also lights the keyboard), and close it when the field goes away.
+        .onChange(of: manager.keyboardFocused) { _, focused in
+            if focused {
+                state.showingApps = false
+                state.showingPlayback = false
+                showingKeyboard = true
+            } else if showingKeyboard {
+                toggleKeyboard()
+            }
+        }
         .onAppear {
             // Start the drip only after the collapsed frame is on screen, so it always animates.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { state.revealed = true }

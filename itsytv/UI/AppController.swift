@@ -629,7 +629,10 @@ final class AppController: NSObject, NSMenuDelegate {
         // created invisibly (it still needs ordering once so its position is set) and
         // only appears when asked for with the island widget's remote button.
         let opensInCommandCenter = UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true
-        if opensInCommandCenter { panel.alphaValue = 0 }
+        if opensInCommandCenter {
+            panel.alphaValue = 0
+            RemoteReveal.shared.revealed = false     // put away until the island's remote button
+        }
 
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
