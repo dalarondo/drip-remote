@@ -56,8 +56,15 @@ struct ControlBackground<S: Shape>: View {
     }
 }
 
-/// The visible region of command center: the island's pill when `progress` is 0, the
-/// whole screen when it is 1. Animating `progress` makes the panel pour out of the island.
+/// The visible region of command center, animated by `progress` (0 → 1) as a drip:
+///
+/// 1. **Swell** (0 – 0.35): a drop of black gathers under the island and hangs from it
+///    by a thinning neck.
+/// 2. **Fall** (0.35 – 0.55): the drop lets go and falls, speeding up, to the middle of
+///    the screen while the neck snaps back into the island.
+/// 3. **Flood** (0.55 – 1): where it lands, it spreads outward until it covers the screen.
+///
+/// Run backwards, the black gathers into a drop and is drawn back up into the island.
 struct IslandReveal: Shape {
     let island: CGRect
     var progress: CGFloat
@@ -67,18 +74,62 @@ struct IslandReveal: Shape {
         set { progress = newValue }
     }
 
+    private static let swellEnd: CGFloat = 0.35
+    private static let fallEnd: CGFloat = 0.55
+
     func path(in rect: CGRect) -> Path {
-        let p = max(0, progress)
-        let r = CGRect(
-            x: island.minX + (rect.minX - island.minX) * p,
-            y: island.minY + (rect.minY - island.minY) * p,
-            width: island.width + (rect.width - island.width) * p,
-            height: island.height + (rect.height - island.height) * p
-        )
-        guard r.width > 0, r.height > 0 else { return Path() }
-        // Pill-shaped in the island, square once it fills the screen.
-        let radius = min(r.width, r.height) / 2 * max(0, 1 - p)
-        return Path(roundedRect: r, cornerRadius: radius)
+        let p = min(1, max(0, progress))
+        if p >= 0.999 { return Path(rect) }
+
+        var path = Path()
+        // The island itself is always part of the shape (black on black – invisible).
+        path.addRoundedRect(in: island, cornerSize: CGSize(width: island.height / 2, height: island.height / 2))
+        guard p > 0 else { return path }
+
+        let cx = island.midX
+        let dropRadius = max(28, island.width * 0.6)
+        let hangY = island.midY + dropRadius * 2.4          // where the drop hangs before letting go
+        let landY = rect.height * 0.5                        // where it lands
+
+        func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
+        func easeOut(_ t: CGFloat) -> CGFloat { 1 - (1 - t) * (1 - t) }
+        func easeInOut(_ t: CGFloat) -> CGFloat { t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2 }
+
+        if p < Self.swellEnd {
+            // 1. Swell: the drop grows and sinks, joined to the island by a pinching neck.
+            let e = easeOut(p / Self.swellEnd)
+            let radius = lerp(island.height * 0.4, dropRadius, e)
+            let centreY = lerp(island.midY, hangY, e)
+            let topHalf = lerp(island.width * 0.45, island.width * 0.2, e)   // neck width at the island
+            let pinch = lerp(topHalf, 5, e)                                  // …and at its thinnest
+            let midY = (island.midY + centreY) / 2
+            path.move(to: CGPoint(x: cx - topHalf, y: island.midY))
+            path.addQuadCurve(to: CGPoint(x: cx - radius * 0.7, y: centreY), control: CGPoint(x: cx - pinch, y: midY))
+            path.addLine(to: CGPoint(x: cx + radius * 0.7, y: centreY))
+            path.addQuadCurve(to: CGPoint(x: cx + topHalf, y: island.midY), control: CGPoint(x: cx + pinch, y: midY))
+            path.closeSubpath()
+            path.addEllipse(in: CGRect(x: cx - radius, y: centreY - radius, width: radius * 2, height: radius * 2))
+        } else if p < Self.fallEnd {
+            // 2. Fall: gravity (t²), with the drop stretching a little as it speeds up.
+            let t = (p - Self.swellEnd) / (Self.fallEnd - Self.swellEnd)
+            let centreY = lerp(hangY, landY, t * t)
+            let stretch = 1 + 0.45 * sin(.pi * t)
+            let w = dropRadius / sqrt(stretch), h = dropRadius * stretch
+            path.addEllipse(in: CGRect(x: cx - w, y: centreY - h, width: w * 2, height: h * 2))
+            // What's left of the neck snaps back up into the island.
+            let stub = lerp(dropRadius * 0.9, 0, min(1, t * 2.5))
+            if stub > 0.5 {
+                path.addEllipse(in: CGRect(x: cx - island.width * 0.2, y: island.midY,
+                                           width: island.width * 0.4, height: stub))
+            }
+        } else {
+            // 3. Flood: spread from the landing point until every corner is covered.
+            let e = easeInOut((p - Self.fallEnd) / (1 - Self.fallEnd))
+            let reach = hypot(max(cx, rect.width - cx), max(landY, rect.height - landY)) + 8
+            let radius = lerp(dropRadius, reach, e)
+            path.addEllipse(in: CGRect(x: cx - radius, y: landY - radius, width: radius * 2, height: radius * 2))
+        }
+        return path
     }
 }
 
@@ -376,7 +427,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         // Controls morph back to round, then the panel retreats into the island.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             self?.state.revealed = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
                 self?.close()
                 completion()
             }
@@ -619,7 +670,8 @@ struct CommandModeView: View {
             .animation(.easeInOut(duration: state.dimmed ? 2 : 0.2), value: state.dimmed)
         }
         .clipShape(IslandReveal(island: island, progress: state.revealed ? 1 : 0))
-        .animation(.spring(response: 0.5, dampingFraction: 0.86), value: state.revealed)
+        // Linear: the drip's own phases do the easing. Faster on the way back in.
+        .animation(.linear(duration: state.revealed ? 1.25 : 0.8), value: state.revealed)
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .onChange(of: manager.connectionStatus) { _, status in
@@ -638,7 +690,7 @@ struct CommandModeView: View {
         .onChange(of: manager.keyboardToggleCounter) { _, _ in toggleKeyboard() }
         .onAppear {
             // Morph from the remote's round controls into the square pad and pills.
-            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(0.45)) { morphed = true }
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(1.1)) { morphed = true }
         }
         .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
         .onChange(of: state.leaving) { _, leaving in
