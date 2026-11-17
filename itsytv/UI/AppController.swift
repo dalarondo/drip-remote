@@ -973,6 +973,7 @@ struct PanelMenuButton: View {
     @AppStorage("commandModeRed") private var commandModeRed = false
     @AppStorage("commandModeDimKeyboard") private var commandModeDimKeyboard = true
     @AppStorage("commandModeClap") private var commandModeClap = false
+    @AppStorage("commandModeGestures") private var commandModeGestures = false
     @AppStorage(CommandTopDisplay.defaultsKey) private var commandModeTopDisplay = CommandTopDisplay.time.rawValue
     @AppStorage("commandModeBannerText") private var commandModeBannerText = ""
     @AppStorage(TouchLayoutPreference.defaultsKey) private var touchLayout = TouchLayoutPreference.auto.rawValue
@@ -989,6 +990,7 @@ struct PanelMenuButton: View {
                 Toggle("Red on black", isOn: $commandModeRed)
                 Toggle("Dim keyboard backlight", isOn: $commandModeDimKeyboard)
                 Toggle("Double clap to play / pause", isOn: $commandModeClap)
+                Toggle("Hand gestures (camera): palm pauses, thumbs-up plays", isOn: $commandModeGestures)
                 Picker("Top display", selection: $commandModeTopDisplay) {
                     ForEach(CommandTopDisplay.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
                 }

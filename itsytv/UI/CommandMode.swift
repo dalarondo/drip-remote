@@ -101,6 +101,8 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
 
     /// Double clap → play / pause, while command mode is open (opt-in setting).
     private let clapDetector = ClapDetector()
+    /// Raised palm → pause, thumbs-up → play, seen by the camera (opt-in setting).
+    private let gestureDetector = HandGestureDetector()
 
     private let cursorHideDelay: TimeInterval = 3
     private var cursorTimer: Timer?
@@ -221,6 +223,23 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
             }
             clapDetector.start()
         }
+
+        if UserDefaults.standard.bool(forKey: "commandModeGestures") {
+            gestureDetector.onGesture = { [weak self] gesture in self?.handle(gesture) }
+            gestureDetector.start()
+        }
+    }
+
+    /// Palm only pauses and thumbs-up only plays when the Apple TV reports its state;
+    /// if the state is unknown, either gesture is a plain play / pause toggle.
+    private func handle(_ gesture: HandGestureDetector.Gesture) {
+        guard window != nil, manager.connectionStatus == .connected else { return }
+        noteActivity()
+        if let playing = manager.mrpManager.nowPlaying?.isPlaying {
+            let wantsPlaying = gesture == .thumbsUp
+            guard playing != wantsPlaying else { return }
+        }
+        manager.pressButton(.playPause)
     }
 
     private func startsOnDPad(windowPoint: NSPoint) -> Bool {
@@ -334,6 +353,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
 
     func close() {
         clapDetector.shutDown()
+        gestureDetector.shutDown()
         if let awakeActivity { ProcessInfo.processInfo.endActivity(awakeActivity) }
         awakeActivity = nil
         isLeaving = false
