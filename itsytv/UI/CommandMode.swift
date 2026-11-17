@@ -75,8 +75,8 @@ struct IslandReveal: Shape {
         set { progress = newValue }
     }
 
-    private static let swellEnd: CGFloat = 0.35
-    private static let fallEnd: CGFloat = 0.55
+    private static let swellEnd: CGFloat = 0.32
+    private static let fallEnd: CGFloat = 0.45
 
     func path(in rect: CGRect) -> Path {
         let p = min(1, max(0, progress))
@@ -88,8 +88,8 @@ struct IslandReveal: Shape {
         guard p > 0 else { return path }
 
         let cx = island.midX
-        let dropRadius = max(28, island.width * 0.6)
-        let hangY = island.midY + dropRadius * 2.4          // where the drop hangs before letting go
+        let dropRadius = max(64, island.width * 1.2)
+        let hangY = island.midY + dropRadius * 2.0          // where the drop hangs before letting go
         let landY = rect.height * 0.5                        // where it lands
 
         func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
@@ -138,8 +138,8 @@ struct IslandReveal: Shape {
 
             // The blob's edge ripples – big lobes right after impact, settling to a clean
             // circle as it spreads – and it lands squashed flat before rounding out.
-            let ripple = 0.22 * pow(1 - c, 1.6)
-            let squash = lerp(0.5, 1, min(1, c * 5))
+            let ripple = 0.38 * pow(1 - c, 1.3)
+            let squash = lerp(0.4, 1, min(1, c * 3))
             let spin = c * 2.2
             let steps = 96
             for i in 0...steps {
@@ -152,19 +152,31 @@ struct IslandReveal: Shape {
 
             // Droplets thrown up and out by the impact, falling back under gravity and
             // shrinking away (the flood overtakes most of them).
-            let life = min(1, c / 0.55)
+            let life = min(1, c / 0.7)
             if life < 1 {
-                let count = 9
+                // A crown of droplets, in two rings: big slow ones and small fast ones.
+                let count = 18
                 for i in 0..<count {
                     let f = CGFloat(i) / CGFloat(count - 1)
-                    let angle = lerp(-.pi * 0.92, -.pi * 0.08, f)               // an upward fan
-                    let speed = rect.height * (0.55 + 0.25 * sin(CGFloat(i) * 2.4))
+                    let fast = i % 2 == 1
+                    let angle = lerp(-.pi * 0.96, -.pi * 0.04, f)               // an upward fan
+                    let speed = rect.height * (fast ? 0.95 : 0.6) * (0.8 + 0.3 * abs(sin(CGFloat(i) * 2.4)))
                     let x = cx + cos(angle) * speed * life
-                    let y = landY + sin(angle) * speed * life + rect.height * 0.55 * life * life
-                    let size = (7 + 5 * abs(sin(CGFloat(i) * 1.7))) * (1 - life)
+                    let y = landY + sin(angle) * speed * life + rect.height * 0.75 * life * life
+                    let size = (fast ? 9 : 20) * (0.7 + 0.5 * abs(sin(CGFloat(i) * 1.7))) * (1 - life * life)
                     if size > 0.5 {
                         path.addEllipse(in: CGRect(x: x - size, y: y - size, width: size * 2, height: size * 2))
                     }
+                }
+                // The rebound: a column of liquid thrown straight back up from the impact,
+                // rising and collapsing, with a bead pinching off its tip.
+                let rise = sin(.pi * life)
+                let columnH = dropRadius * 3.2 * rise
+                let columnW = dropRadius * 0.55 * (1 - life * 0.5)
+                if columnH > 1 {
+                    path.addEllipse(in: CGRect(x: cx - columnW / 2, y: landY - columnH, width: columnW, height: columnH))
+                    let bead = dropRadius * 0.3 * rise
+                    path.addEllipse(in: CGRect(x: cx - bead, y: landY - columnH - bead * 1.6, width: bead * 2, height: bead * 2))
                 }
             }
         }
@@ -202,6 +214,8 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
     private let manager: AppleTVManager
     private let iconLoader: AppIconLoader
     private(set) var window: NSWindow?
+    /// The screen command center last opened on (the island widget lives there too).
+    private(set) var lastScreen: NSScreen?
     private let state = CommandModeState()
     private var activityMonitor: Any?
     private var idleTimer: Timer?
@@ -300,8 +314,9 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         state.revealed = false
         window.makeKeyAndOrderFront(nil)
         self.window = window
-        // Next run loop, so the view first draws collapsed in the island, then expands.
-        DispatchQueue.main.async { [weak self] in self?.state.revealed = true }
+        // The view starts the drip itself once it has drawn collapsed (see its onAppear),
+        // so the animation plays every time rather than racing the first frame.
+        lastScreen = screen
 
         state.dimmed = false
         activityMonitor = NSEvent.addLocalMonitorForEvents(
@@ -466,7 +481,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         // Controls morph back to round, then the panel retreats into the island.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             self?.state.revealed = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.05) {
                 self?.close()
                 completion()
             }
@@ -481,7 +496,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
     /// Where the camera island (or notch) sits, in top-left-origin screen coordinates:
     /// the gap between the two usable strips either side of it. On a screen without
     /// one, a small pill at the top centre stands in.
-    private static func islandRect(on screen: NSScreen) -> CGRect {
+    static func islandRect(on screen: NSScreen) -> CGRect {
         let frame = screen.frame
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea,
            right.minX > left.maxX, screen.safeAreaInsets.top > 0 {
@@ -710,7 +725,7 @@ struct CommandModeView: View {
         }
         .clipShape(IslandReveal(island: island, progress: state.revealed ? 1 : 0))
         // Linear: the drip's own phases do the easing. Faster on the way back in.
-        .animation(.linear(duration: state.revealed ? 1.5 : 0.8), value: state.revealed)
+        .animation(.linear(duration: state.revealed ? 2.4 : 1.0), value: state.revealed)
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .onChange(of: manager.connectionStatus) { _, status in
@@ -728,8 +743,10 @@ struct CommandModeView: View {
         }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in toggleKeyboard() }
         .onAppear {
+            // Start the drip only after the collapsed frame is on screen, so it always animates.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { state.revealed = true }
             // Morph from the remote's round controls into the square pad and pills.
-            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(1.3)) { morphed = true }
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.82).delay(2.1)) { morphed = true }
         }
         .onChange(of: showingKeyboard) { _, showing in state.textEntryActive = showing }
         .onChange(of: state.leaving) { _, leaving in

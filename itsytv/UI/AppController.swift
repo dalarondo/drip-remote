@@ -19,6 +19,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private var panelHostingView: NSView?
     private lazy var commandMode = CommandModeController(manager: manager, iconLoader: iconLoader)
     private var commandModeObserver: NSObjectProtocol?
+    /// What command center retracts into: a Live Activity-style pill around the island.
+    private lazy var islandWidget = IslandWidgetController(manager: manager)
     /// Touch layout: the panel is snapped to the right screen edge.
     private var isDocked = false
     private var isRedocking = false
@@ -37,6 +39,12 @@ final class AppController: NSObject, NSMenuDelegate {
         // Watch the menu bar icon too, so opening the remote with a finger counts as touch.
         if let button = statusItem.button { TouchMode.shared.attachSniffer(to: button) }
         commandMode.onExit = { [weak self] in self?.exitCommandMode() }
+        islandWidget.onDrip = { [weak self] in self?.enterCommandMode() }
+        islandWidget.onRemote = { [weak self] in
+            guard let panel = self?.panel else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        }
         commandModeObserver = NotificationCenter.default.addObserver(
             forName: .toggleCommandMode, object: nil, queue: .main
         ) { [weak self] _ in
@@ -679,6 +687,7 @@ final class AppController: NSObject, NSMenuDelegate {
         releaseHeldKey(reason: "command mode")
         let screen = panel?.screen
         panel?.orderOut(nil)
+        islandWidget.hide()
         TouchMode.shared.commandModeActive = true
         commandMode.show(preferredScreen: screen)
     }
@@ -692,10 +701,18 @@ final class AppController: NSObject, NSMenuDelegate {
         guard commandMode.isActive else { return }
         releaseHeldKey(reason: "command mode")
         commandMode.animateOut { [weak self] in
+            guard let self else { return }
             TouchMode.shared.commandModeActive = false
-            if let panel = self?.panel {
+            // It has just retracted into the island: leave the widget there. The small
+            // remote stays hidden until asked for (the widget's remote button).
+            guard let panel = self.panel else { return }
+            switch self.manager.connectionStatus {
+            case .error, .localNetworkDenied:
+                // Errors are shown by the small remote.
                 NSApp.activate(ignoringOtherApps: true)
                 panel.makeKeyAndOrderFront(nil)
+            default:
+                self.islandWidget.show(on: self.commandMode.lastScreen)
             }
         }
     }
@@ -754,6 +771,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func dismissPanel() {
+        islandWidget.hide()
         if commandMode.isActive {
             commandMode.close()
             TouchMode.shared.commandModeActive = false
@@ -1271,6 +1289,7 @@ extension AppController: NSWindowDelegate {
         if (notification.object as? NSPanel) === panel {
             TouchMode.shared.onChange = nil
             isDocked = false
+            islandWidget.hide()
             savePanelPosition()
             if manager.connectionStatus != .disconnected {
                 manager.disconnect()
