@@ -37,6 +37,8 @@ final class IslandWidgetController {
 
     func collapse() { state.expanded = false }
 
+    var isExpanded: Bool { state.expanded }
+
     init(manager: AppleTVManager) {
         self.manager = manager
     }
@@ -113,7 +115,8 @@ struct IslandWidgetView: View {
     /// Width of each "ear" either side of the camera in the compact pill.
     static let ear: CGFloat = 64
     private var ear: CGFloat { Self.ear }
-    private let expandedSize = CGSize(width: 420, height: 262)
+    static let expandedSize = CGSize(width: 420, height: 262)
+    private var expandedSize: CGSize { Self.expandedSize }
 
     private var isPlaying: Bool { manager.mrpManager.nowPlaying?.isPlaying == true }
 

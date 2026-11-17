@@ -713,9 +713,11 @@ final class AppController: NSObject, NSMenuDelegate {
         let screen = panel?.screen
         panel?.orderOut(nil)
         islandWidget.remoteIsOpen = false
+        // Drip out of whatever the island looks like right now: open card or closed pill.
+        let fromExpanded = islandWidget.isVisible && islandWidget.isExpanded
         islandWidget.hide()
         TouchMode.shared.commandModeActive = true
-        commandMode.show(preferredScreen: screen)
+        commandMode.show(preferredScreen: screen, fromExpandedIsland: fromExpanded)
     }
 
     @objc private func handlePanelPinch(_ pinch: NSMagnificationGestureRecognizer) {
