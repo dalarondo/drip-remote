@@ -9,7 +9,10 @@ private let log = Logger(subsystem: "com.itsytv.app", category: "Gesture")
 /// detector; nothing is recorded or sent anywhere.
 final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     enum Gesture: String {
-        case palm, thumbsUp
+        case palm, thumbsUp, waveLeft, waveRight
+
+        /// Palm and a wave to the left mean stop; thumbs-up and a wave to the right mean go.
+        var wantsPlaying: Bool { self == .thumbsUp || self == .waveRight }
     }
 
     /// Called on the main queue when a gesture has been held long enough.
@@ -20,7 +23,10 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private let holdTime: TimeInterval = 0.8         // how long the shape must be held
     private let dropTolerance: TimeInterval = 0.4    // missed frames allowed during the hold
     private let cooldown: TimeInterval = 2.0
-    private let minConfidence: Float = 0.3
+    private let minConfidence: Float = 0.2
+    // Waves: the raised hand must travel this many shoulder-widths sideways, this fast.
+    private let waveTravel: CGFloat = 0.9
+    private let waveWindow: TimeInterval = 0.7
 
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "com.itsytv.gesture")
@@ -29,6 +35,10 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         r.maximumHandCount = 2
         return r
     }()
+    /// Finds the person at a distance, where a hand is too small for the hand detector alone.
+    private let bodyRequest = VNDetectHumanBodyPoseRequest()
+    private var wristTracks: [String: [(t: TimeInterval, x: CGFloat, y: CGFloat)]] = [:]
+    private var lastDiagnostic: TimeInterval = 0
     private var configured = false
     private var wanted = false
 
@@ -74,7 +84,13 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
                     return
                 }
                 self.session.beginConfiguration()
-                self.session.sessionPreset = .vga640x480   // plenty for hand pose, and light on power
+                // A hand across the room is only a few dozen pixels at VGA, so use the
+                // highest of these the camera supports.
+                for preset in [AVCaptureSession.Preset.hd1920x1080, .hd1280x720, .vga640x480]
+                where self.session.canSetSessionPreset(preset) {
+                    self.session.sessionPreset = preset
+                    break
+                }
                 if self.session.canAddInput(input) { self.session.addInput(input) }
                 let output = AVCaptureVideoDataOutput()
                 output.alwaysDiscardsLateVideoFrames = true
@@ -98,11 +114,88 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastFrame >= frameInterval, let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastFrame = now
-
+        let width = CGFloat(CVPixelBufferGetWidth(pixels))
+        let height = CGFloat(CVPixelBufferGetHeight(pixels))
         let handler = VNImageRequestHandler(cvPixelBuffer: pixels, orientation: .up)
+
+        // 1. Whole frame – works when the hand is close to the camera.
+        request.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
         try? handler.perform([request])
-        let seen = (request.results ?? []).compactMap(classify).first
+        var hands = request.results?.count ?? 0
+        var seen = (request.results ?? []).compactMap { classify($0, scaleX: width, scaleY: height) }.first
+
+        // 2. At a distance: find the body, then look for a hand in a close crop around each wrist.
+        try? handler.perform([bodyRequest])
+        let body = bodyRequest.results?.first
+        var wave: Gesture?
+        if let body, let joints = try? body.recognizedPoints(.all) {
+            func j(_ name: VNHumanBodyPoseObservation.JointName) -> CGPoint? {
+                guard let point = joints[name], point.confidence >= minConfidence else { return nil }
+                return CGPoint(x: point.location.x * width, y: point.location.y * height)   // pixels
+            }
+            let shoulders: CGFloat? = {
+                guard let l = j(.leftShoulder), let r = j(.rightShoulder) else { return nil }
+                return hypot(l.x - r.x, l.y - r.y)
+            }()
+
+            for (side, wristName, elbowName) in [("L", VNHumanBodyPoseObservation.JointName.leftWrist, VNHumanBodyPoseObservation.JointName.leftElbow),
+                                                  ("R", .rightWrist, .rightElbow)] {
+                guard let wrist = j(wristName), let elbow = j(elbowName) else {
+                    wristTracks[side] = nil
+                    continue
+                }
+                let forearm = hypot(wrist.x - elbow.x, wrist.y - elbow.y)
+
+                // Wave: a raised hand (wrist above elbow) sweeping sideways.
+                if wrist.y > elbow.y, let shoulders, shoulders > 1 {
+                    if let w = trackWave(side: side, wrist: wrist, scale: shoulders, now: now) { wave = w }
+                } else {
+                    wristTracks[side] = nil
+                }
+
+                // Hand shape: crop a square around where the hand must be and run hand pose on it.
+                guard seen == nil, forearm > 4 else { continue }
+                let sidePx = max(forearm * 2.4, 96)
+                let centre = CGPoint(x: wrist.x + (wrist.x - elbow.x) * 0.45, y: wrist.y + (wrist.y - elbow.y) * 0.45)
+                let roiPx = CGRect(x: centre.x - sidePx / 2, y: centre.y - sidePx / 2, width: sidePx, height: sidePx)
+                    .intersection(CGRect(x: 0, y: 0, width: width, height: height))
+                guard roiPx.width > 32, roiPx.height > 32 else { continue }
+                request.regionOfInterest = CGRect(x: roiPx.minX / width, y: roiPx.minY / height,
+                                                  width: roiPx.width / width, height: roiPx.height / height)
+                try? handler.perform([request])
+                hands += request.results?.count ?? 0
+                seen = (request.results ?? []).compactMap { classify($0, scaleX: roiPx.width, scaleY: roiPx.height) }.first
+            }
+        } else {
+            wristTracks.removeAll()
+        }
+
+        if now - lastDiagnostic > 3 {
+            lastDiagnostic = now
+            log.notice("seeing: body \(body != nil, privacy: .public) hands \(hands) shape \(seen?.rawValue ?? "none", privacy: .public)")
+        }
+
+        if let wave, now - lastFire > cooldown {
+            lastFire = now
+            wristTracks.removeAll()
+            log.notice("gesture: \(wave.rawValue, privacy: .public)")
+            DispatchQueue.main.async { [weak self] in self?.onGesture?(wave) }
+            return
+        }
         update(seen: seen, now: now)
+    }
+
+    /// Sideways travel of a raised wrist within the wave window, in shoulder-widths.
+    private func trackWave(side: String, wrist: CGPoint, scale: CGFloat, now: TimeInterval) -> Gesture? {
+        var track = (wristTracks[side] ?? []).filter { now - $0.t <= waveWindow }
+        track.append((now, wrist.x, wrist.y))
+        wristTracks[side] = track
+        guard let first = track.first, track.count >= 3 else { return nil }
+        let dx = wrist.x - first.x
+        let dy = wrist.y - first.y
+        guard abs(dx) > scale * waveTravel, abs(dy) < abs(dx) * 0.5 else { return nil }
+        // The camera image is not mirrored: your left is the image's right (x grows).
+        return dx > 0 ? .waveLeft : .waveRight
     }
 
     private func update(seen: Gesture?, now: TimeInterval) {
@@ -127,11 +220,13 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
 
     // MARK: - Hand shape
 
-    private func classify(_ hand: VNHumanHandPoseObservation) -> Gesture? {
+    /// `scaleX` / `scaleY` are the pixel size of the region the hand was detected in, so
+    /// distances are measured in pixels (Vision's 0–1 coordinates stretch x and y differently).
+    private func classify(_ hand: VNHumanHandPoseObservation, scaleX: CGFloat, scaleY: CGFloat) -> Gesture? {
         guard let points = try? hand.recognizedPoints(.all) else { return nil }
         func p(_ name: VNHumanHandPoseObservation.JointName) -> CGPoint? {
             guard let point = points[name], point.confidence >= minConfidence else { return nil }
-            return point.location
+            return CGPoint(x: point.location.x * scaleX, y: point.location.y * scaleY)
         }
         guard let wrist = p(.wrist),
               let thumbTip = p(.thumbTip), let thumbIP = p(.thumbIP), let thumbCMC = p(.thumbCMC),
@@ -144,11 +239,11 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         func dist(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x - b.x, a.y - b.y) }
         // Hand size, to make every threshold independent of distance from the camera.
         let size = dist(wrist, middleMCP)
-        guard size > 0.01 else { return nil }
+        guard size > 4 else { return nil }
 
         // A finger is extended when its tip is clearly further from the wrist than its
         // middle joint, and curled when the tip has come back inside it.
-        func extended(_ tip: CGPoint, _ pip: CGPoint) -> Bool { dist(tip, wrist) > dist(pip, wrist) * 1.2 }
+        func extended(_ tip: CGPoint, _ pip: CGPoint) -> Bool { dist(tip, wrist) > dist(pip, wrist) * 1.12 }
         func curled(_ tip: CGPoint, _ pip: CGPoint) -> Bool { dist(tip, wrist) < dist(pip, wrist) * 1.05 }
 
         let fingers = [(indexTip, indexPIP), (middleTip, middlePIP), (ringTip, ringPIP), (littleTip, littlePIP)]
@@ -157,7 +252,7 @@ final class HandGestureDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
         // Vision's y axis points up.
         // Open palm, raised: every finger extended, fingertips well above the wrist.
         if fingers.allSatisfy({ extended($0.0, $0.1) }), thumbOut,
-           middleTip.y - wrist.y > size * 1.2 {
+           middleTip.y - wrist.y > size * 1.0 {
             return .palm
         }
 

@@ -236,8 +236,7 @@ final class CommandModeController: NSObject, NSGestureRecognizerDelegate {
         guard window != nil, manager.connectionStatus == .connected else { return }
         noteActivity()
         if let playing = manager.mrpManager.nowPlaying?.isPlaying {
-            let wantsPlaying = gesture == .thumbsUp
-            guard playing != wantsPlaying else { return }
+            guard playing != gesture.wantsPlaying else { return }
         }
         manager.pressButton(.playPause)
     }

@@ -990,7 +990,7 @@ struct PanelMenuButton: View {
                 Toggle("Red on black", isOn: $commandModeRed)
                 Toggle("Dim keyboard backlight", isOn: $commandModeDimKeyboard)
                 Toggle("Double clap to play / pause", isOn: $commandModeClap)
-                Toggle("Hand gestures (camera): palm pauses, thumbs-up plays", isOn: $commandModeGestures)
+                Toggle("Hand gestures (camera): palm or wave left pauses, thumbs-up or wave right plays", isOn: $commandModeGestures)
                 Picker("Top display", selection: $commandModeTopDisplay) {
                     ForEach(CommandTopDisplay.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
                 }
