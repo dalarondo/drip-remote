@@ -26,6 +26,8 @@ final class IslandWidgetController {
     var onDrip: (() -> Void)?
     /// Remote button: show the small touch remote.
     var onRemote: (() -> Void)?
+    /// The widget opened (true) or closed (false).
+    var onExpandedChange: ((Bool) -> Void)?
 
     var isVisible: Bool { panel != nil }
 
@@ -72,7 +74,8 @@ final class IslandWidgetController {
             state: state,
             islandSize: island.size,
             onDrip: { [weak self] in self?.onDrip?() },
-            onRemote: { [weak self] in self?.onRemote?() }
+            onRemote: { [weak self] in self?.onRemote?() },
+            onExpandedChange: { [weak self] in self?.onExpandedChange?($0) }
         )
         .environment(manager)
 
@@ -109,8 +112,7 @@ struct IslandWidgetView: View {
     let islandSize: CGSize
     let onDrip: () -> Void
     let onRemote: () -> Void
-
-    @AppStorage("commandModeRed") private var redOnBlack = false
+    let onExpandedChange: (Bool) -> Void
 
     /// Width of each "ear" either side of the camera in the compact pill.
     static let ear: CGFloat = 64
@@ -149,10 +151,9 @@ struct IslandWidgetView: View {
         .onTapGesture { if !expanded { state.expanded = true } }
         // Interacting with the island takes over: the remote shrinks back in as it expands.
         .onChange(of: state.expanded) { _, isExpanded in
-            if isExpanded, state.remoteIsOpen { onRemote() }
+            onExpandedChange(isExpanded)
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.78), value: expanded)
-        .colorMultiply(redOnBlack ? Color(red: 1, green: 0.12, blue: 0.08) : .white)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
     }

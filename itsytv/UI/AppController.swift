@@ -46,6 +46,20 @@ final class AppController: NSObject, NSMenuDelegate {
             guard let self, self.islandStyleRemote, self.panel?.isVisible == true else { return }
             self.toggleIslandRemote()
         }
+        // The island opened or closed while the remote is out.
+        islandWidget.onExpandedChange = { [weak self] expanded in
+            guard let self, let panel = self.panel, panel.isVisible, RemoteReveal.shared.revealed else { return }
+            if expanded {
+                // Interacting with the island takes over: the remote shrinks back in.
+                self.toggleIslandRemote()
+            } else {
+                // The card closed under it: slide up and hang from the pill instead.
+                let frame = self.islandRemoteFrame(width: panel.frame.width, height: panel.frame.height)
+                self.isRedocking = true
+                panel.setFrame(frame, display: true, animate: true)
+                self.isRedocking = false
+            }
+        }
         islandWidget.onRemote = { [weak self] in
             self?.toggleIslandRemote()
         }
@@ -798,12 +812,13 @@ final class AppController: NSObject, NSMenuDelegate {
         guard let screen = commandMode.lastScreen ?? panel?.screen ?? NSScreen.main else {
             return NSRect(x: 0, y: 0, width: width, height: height)
         }
-        let island = CommandModeController.islandRect(on: screen)
-        // Tucked up under the island widget's pill, so the remote's neck runs into it.
-        RemotePour.neckWidth = island.width + IslandWidgetView.ear * 2     // exactly the pill's width
-        let top = screen.frame.maxY - island.maxY + 22
+        // Hang from whatever the island looks like now – the open card or the closed pill –
+        // tucked up behind its rounded bottom so the neck runs straight into it.
+        let source = CommandModeController.widgetRect(on: screen, expanded: islandWidget.isVisible && islandWidget.isExpanded)
+        RemoteReveal.shared.neckWidth = source.rect.width          // exactly the island's width
+        let top = screen.frame.maxY - source.rect.maxY + source.radius + 2
         let h = min(height, top - screen.visibleFrame.minY - 8)
-        return NSRect(x: screen.frame.minX + island.midX - width / 2, y: top - h, width: width, height: h)
+        return NSRect(x: screen.frame.minX + source.rect.midX - width / 2, y: top - h, width: width, height: h)
     }
 
     /// Remote button on the island widget: first tap drips the remote out, second tap
@@ -828,7 +843,6 @@ final class AppController: NSObject, NSMenuDelegate {
             panel.setFrame(frame, display: true)
             isRedocking = false
             islandWidget.remoteIsOpen = true
-            islandWidget.collapse()
             // Start the drip once the collapsed frame is on screen.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { RemoteReveal.shared.revealed = true }
         }
@@ -1372,6 +1386,8 @@ struct PanelContentView: View {
 final class RemoteReveal {
     static let shared = RemoteReveal()
     var revealed = true
+    /// Width of the island shape the remote hangs from (pill or open card).
+    var neckWidth: CGFloat = 187
 }
 
 extension Notification.Name {
@@ -1384,16 +1400,17 @@ extension Notification.Name {
 private struct IslandRemoteStyle: ViewModifier {
     let enabled: Bool
     let width: CGFloat
-    @AppStorage("commandModeRed") private var redOnBlack = false
 
     func body(content: Content) -> some View {
         if enabled {
+            // Always white on black: red is for full-screen command center only.
             content
                 .padding(.top, RemotePour.neckHeight)
                 .environment(\.oledControls, true)
                 .background(Color.black)
-                .colorMultiply(redOnBlack ? Color(red: 1, green: 0.12, blue: 0.08) : .white)
-                .clipShape(RemotePour(progress: RemoteReveal.shared.revealed ? 1 : 0))
+                .clipShape(RemotePour(neckWidth: RemoteReveal.shared.neckWidth,
+                                      progress: RemoteReveal.shared.revealed ? 1 : 0))
+                .animation(.smooth(duration: 0.35), value: RemoteReveal.shared.neckWidth)
                 .animation(.smooth(duration: RemoteReveal.shared.revealed ? 0.7 : 0.45), value: RemoteReveal.shared.revealed)
                 .preferredColorScheme(.dark)
         } else {
@@ -1407,8 +1424,8 @@ private struct IslandRemoteStyle: ViewModifier {
 /// then the body widens and lengthens beneath it. No wobble, no splash.
 struct RemotePour: Shape {
     static let neckHeight: CGFloat = 36
-    /// Matches the island widget's compact pill, so the two edges meet (set from the screen's island).
-    static var neckWidth: CGFloat = 187
+    /// The width of whatever it hangs from – the island widget's pill or its open card.
+    var neckWidth: CGFloat
 
     var progress: CGFloat
 
@@ -1424,7 +1441,7 @@ struct RemotePour: Shape {
         func smooth(_ t: CGFloat) -> CGFloat { let c = min(1, max(0, t)); return c * c * (3 - 2 * c) }
 
         let cx = rect.midX
-        let neckW = Self.neckWidth
+        let neckW = min(neckWidth, rect.width)
         let neckDown = smooth(p / 0.3)                 // the neck reaches down first…
         let spread = smooth((p - 0.15) / 0.85)         // …then the body spreads out under it
 
