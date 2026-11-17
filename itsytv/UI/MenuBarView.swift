@@ -55,7 +55,14 @@ struct RemoteControlView: View {
                     }
                     manager.disconnect()
                 }
-                PanelCloseButton { manager.disconnect() }
+                PanelCloseButton {
+                    // Island style: ✕ only puts the remote away. Disconnect is in the ⋯ menu.
+                    if TouchMode.shared.islandStyle {
+                        NotificationCenter.default.post(name: .putAwayIslandRemote, object: nil)
+                    } else {
+                        manager.disconnect()
+                    }
+                }
             }
             .padding(.horizontal, 8)
             .padding(.top, 8)

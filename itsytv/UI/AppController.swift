@@ -42,6 +42,10 @@ final class AppController: NSObject, NSMenuDelegate {
         if let button = statusItem.button { TouchMode.shared.attachSniffer(to: button) }
         commandMode.onExit = { [weak self] in self?.exitCommandMode() }
         islandWidget.onDrip = { [weak self] in self?.enterCommandMode() }
+        NotificationCenter.default.addObserver(forName: .putAwayIslandRemote, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.islandStyleRemote, self.panel?.isVisible == true else { return }
+            self.toggleIslandRemote()
+        }
         islandWidget.onRemote = { [weak self] in
             self?.toggleIslandRemote()
         }
@@ -568,6 +572,7 @@ final class AppController: NSObject, NSMenuDelegate {
         // Island style (command center is the main interface): the remote is black, drawn
         // entirely by the view so it can drip out of the island – no system material behind it.
         islandStyleRemote = UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true
+        TouchMode.shared.islandStyle = islandStyleRemote
         let vibrancy: NSView = islandStyleRemote ? NSView(frame: effectView.frame) : effectView
         vibrancy.addSubview(hostingView)
 
@@ -792,7 +797,8 @@ final class AppController: NSObject, NSMenuDelegate {
             return NSRect(x: 0, y: 0, width: width, height: height)
         }
         let island = CommandModeController.islandRect(on: screen)
-        let top = screen.frame.maxY - island.maxY - 6
+        // Tucked up under the island widget's pill, so the remote's neck runs into it.
+        let top = screen.frame.maxY - island.maxY + 14
         let h = min(height, top - screen.visibleFrame.minY - 8)
         return NSRect(x: screen.frame.minX + island.midX - width / 2, y: top - h, width: width, height: h)
     }
@@ -803,7 +809,7 @@ final class AppController: NSObject, NSMenuDelegate {
         guard let panel else { return }
         if panel.isVisible {
             RemoteReveal.shared.revealed = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let panel = self?.panel, !RemoteReveal.shared.revealed else { return }
                 panel.orderOut(nil)
                 self?.islandWidget.remoteIsOpen = false
@@ -850,6 +856,7 @@ final class AppController: NSObject, NSMenuDelegate {
             TouchMode.shared.commandModeActive = false
         }
         TouchMode.shared.onChange = nil
+        TouchMode.shared.islandStyle = false
         isDocked = false
         undockedTopLeft = nil
         removeKeyboardMonitor()
@@ -980,7 +987,13 @@ final class AppController: NSObject, NSMenuDelegate {
 
         switch shortcut {
         case .close:
-            if commandMode.isActive { exitCommandMode() } else { manager.disconnect() }
+            if commandMode.isActive {
+                exitCommandMode()
+            } else if islandStyleRemote {
+                toggleIslandRemote()        // back into the island; Disconnect is in the ⋯ menu
+            } else {
+                manager.disconnect()
+            }
         case .keyboard:
             manager.keyboardToggleCounter &+= 1
             manager.triggerKeyboardBlink(.siri)
@@ -1070,6 +1083,7 @@ private final class ArrowCursorHostingView<Content: View>: NSHostingView<Content
 }
 
 struct PanelMenuButton: View {
+    @Environment(AppleTVManager.self) private var manager
     let deviceID: String
     let onUnpair: () -> Void
     @AppStorage("alwaysOnTop") private var alwaysOnTop = true
@@ -1130,6 +1144,7 @@ struct PanelMenuButton: View {
                 }
             }
             Divider()
+            Button("Disconnect") { manager.disconnect() }
             Button("Unpair", role: .destructive, action: onUnpair)
         } label: {
             ZStack {
@@ -1356,9 +1371,13 @@ final class RemoteReveal {
     var revealed = true
 }
 
+extension Notification.Name {
+    /// The remote's ✕ in island style: draw it back into the island (don't disconnect).
+    static let putAwayIslandRemote = Notification.Name("itsytv.putAwayIslandRemote")
+}
+
 /// Island style for the small remote: black, outline controls, red when "Red on black"
-/// is on, and revealed with the same drip as command center – from a point just above
-/// its top edge, which sits right under the island.
+/// is on. It stays joined to the island by a neck, and pours out of / back into it.
 private struct IslandRemoteStyle: ViewModifier {
     let enabled: Bool
     let width: CGFloat
@@ -1366,18 +1385,67 @@ private struct IslandRemoteStyle: ViewModifier {
 
     func body(content: Content) -> some View {
         if enabled {
-            let source = CGRect(x: width / 2 - 30, y: -46, width: 60, height: 40)
             content
+                .padding(.top, RemotePour.neckHeight)
                 .environment(\.oledControls, true)
                 .background(Color.black)
                 .colorMultiply(redOnBlack ? Color(red: 1, green: 0.12, blue: 0.08) : .white)
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .clipShape(IslandReveal(island: source, progress: RemoteReveal.shared.revealed ? 1 : 0))
-                .animation(.linear(duration: RemoteReveal.shared.revealed ? 1.4 : 0.7), value: RemoteReveal.shared.revealed)
+                .clipShape(RemotePour(progress: RemoteReveal.shared.revealed ? 1 : 0))
+                .animation(.smooth(duration: RemoteReveal.shared.revealed ? 0.7 : 0.45), value: RemoteReveal.shared.revealed)
                 .preferredColorScheme(.dark)
         } else {
             content
         }
+    }
+}
+
+/// The remote's outline: a neck coming down from the island that flares into a rounded
+/// body. `progress` 0 → 1 pours it out in one smooth motion – the neck extends first,
+/// then the body widens and lengthens beneath it. No wobble, no splash.
+struct RemotePour: Shape {
+    static let neckHeight: CGFloat = 30
+    static let neckWidth: CGFloat = 104
+
+    var progress: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let p = min(1, max(0, progress))
+        guard p > 0.001 else { return Path() }
+        func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
+        func smooth(_ t: CGFloat) -> CGFloat { let c = min(1, max(0, t)); return c * c * (3 - 2 * c) }
+
+        let cx = rect.midX
+        let neckW = Self.neckWidth
+        let neckDown = smooth(p / 0.3)                 // the neck reaches down first…
+        let spread = smooth((p - 0.15) / 0.85)         // …then the body spreads out under it
+
+        let bodyY = Self.neckHeight * neckDown
+        let bodyW = lerp(neckW, rect.width, spread)
+        let bodyH = max(1, lerp(0, rect.height - Self.neckHeight, spread))
+        let radius = min(lerp(neckW / 2, 26, spread), bodyW / 2, bodyH / 2)
+        let body = Path(roundedRect: CGRect(x: cx - bodyW / 2, y: bodyY, width: bodyW, height: bodyH),
+                        cornerRadius: radius, style: .continuous)
+
+        // Neck: straight sides that flare out into the top of the body.
+        let flare = max(0, min(22, (bodyW - neckW) / 2 - radius * 0.3, bodyY))
+        var neck = Path()
+        neck.move(to: CGPoint(x: cx - neckW / 2, y: 0))
+        neck.addLine(to: CGPoint(x: cx + neckW / 2, y: 0))
+        neck.addLine(to: CGPoint(x: cx + neckW / 2, y: bodyY - flare))
+        neck.addQuadCurve(to: CGPoint(x: cx + neckW / 2 + flare, y: bodyY + 1),
+                          control: CGPoint(x: cx + neckW / 2, y: bodyY))
+        neck.addLine(to: CGPoint(x: cx - neckW / 2 - flare, y: bodyY + 1))
+        neck.addQuadCurve(to: CGPoint(x: cx - neckW / 2, y: bodyY - flare),
+                          control: CGPoint(x: cx - neckW / 2, y: bodyY))
+        neck.closeSubpath()
+
+        // A true union, so the overlap can never cancel into a hole.
+        return neck.union(body)
     }
 }
 
@@ -1396,6 +1464,7 @@ extension AppController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         if (notification.object as? NSPanel) === panel {
             TouchMode.shared.onChange = nil
+        TouchMode.shared.islandStyle = false
             isDocked = false
             islandWidget.hide()
             savePanelPosition()

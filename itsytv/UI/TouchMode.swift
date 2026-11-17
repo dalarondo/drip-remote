@@ -45,8 +45,13 @@ final class TouchMode: NSObject, NSGestureRecognizerDelegate {
         didSet { notifyIfChanged() }
     }
 
+    /// Island style always uses the wide touch remote (no artwork), whatever the input.
+    var islandStyle = false {
+        didSet { notifyIfChanged() }
+    }
+
     var isTouch: Bool {
-        if commandModeActive { return true }
+        if commandModeActive || islandStyle { return true }
         return switch preference {
         case .auto: touchDetected
         case .always: true
