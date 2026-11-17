@@ -29,6 +29,14 @@ final class IslandWidgetController {
 
     var isVisible: Bool { panel != nil }
 
+    /// The small remote is currently out (the remote button shows as active).
+    var remoteIsOpen: Bool {
+        get { state.remoteIsOpen }
+        set { state.remoteIsOpen = newValue }
+    }
+
+    func collapse() { state.expanded = false }
+
     init(manager: AppleTVManager) {
         self.manager = manager
     }
@@ -90,6 +98,7 @@ final class IslandWidgetController {
 @Observable
 final class IslandWidgetState {
     var expanded = false
+    var remoteIsOpen = false
 }
 
 struct IslandWidgetView: View {
@@ -143,10 +152,15 @@ struct IslandWidgetView: View {
     // Compact: a glyph left of the camera, playback state right of it.
     private var compactContent: some View {
         HStack(spacing: 0) {
-            Image(systemName: "appletv.fill")
+            // While the remote is out, the left ear is a shortcut to put it away.
+            Image(systemName: state.remoteIsOpen ? "appletvremote.gen4.fill" : "appletv.fill")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.85))
-                .frame(width: ear)
+                .frame(width: ear, height: islandSize.height)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if state.remoteIsOpen { onRemote() } else { state.expanded = true }
+                }
             Spacer().frame(width: islandSize.width)
             Image(systemName: isPlaying ? "waveform" : "pause.fill")
                 .font(.system(size: 13, weight: .medium))
@@ -179,7 +193,9 @@ struct IslandWidgetView: View {
             .onTapGesture { state.expanded = false }   // tap the title to collapse
 
             HStack(spacing: 14) {
-                control("appletvremote.gen4.fill", size: 44, help: "Show the remote", action: onRemote)
+                control("appletvremote.gen4.fill", size: 44,
+                        help: state.remoteIsOpen ? "Put the remote away" : "Show the remote",
+                        active: state.remoteIsOpen, action: onRemote)
                 control("backward.fill", size: 48, help: "Previous") { mrp.sendCommand(.previousTrack) }
                 control(isPlaying ? "pause.fill" : "play.fill", size: 60, help: "Play / pause") {
                     manager.pressButton(.playPause)
@@ -199,12 +215,14 @@ struct IslandWidgetView: View {
         }
     }
 
-    private func control(_ symbol: String, size: CGFloat, help: String, action: @escaping () -> Void) -> some View {
+    private func control(_ symbol: String, size: CGFloat, help: String, active: Bool = false,
+                         action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: size * 0.38, weight: .medium))
                 .foregroundStyle(.white.opacity(0.9))
                 .frame(width: size, height: size)
+                .background(Circle().fill(Color.white.opacity(active ? 0.22 : 0)))
                 .background(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1.5))
                 .contentShape(Circle())
         }

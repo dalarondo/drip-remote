@@ -17,6 +17,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private var observation: AnyCancellable?
     private var panel: NSPanel?
     private var panelHostingView: NSView?
+    /// The small remote is black, hangs under the island and drips in and out of it.
+    private var islandStyleRemote = false
     private lazy var commandMode = CommandModeController(manager: manager, iconLoader: iconLoader)
     private var commandModeObserver: NSObjectProtocol?
     /// What command center retracts into: a Live Activity-style pill around the island.
@@ -41,10 +43,7 @@ final class AppController: NSObject, NSMenuDelegate {
         commandMode.onExit = { [weak self] in self?.exitCommandMode() }
         islandWidget.onDrip = { [weak self] in self?.enterCommandMode() }
         islandWidget.onRemote = { [weak self] in
-            guard let self, let panel = self.panel else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            panel.makeKeyAndOrderFront(nil)
-            if TouchMode.shared.isTouch { self.applyPanelLayout(animated: false) }
+            self?.toggleIslandRemote()
         }
         commandModeObserver = NotificationCenter.default.addObserver(
             forName: .toggleCommandMode, object: nil, queue: .main
@@ -562,10 +561,14 @@ final class AppController: NSObject, NSMenuDelegate {
         maskImage.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius, bottom: cornerRadius, right: cornerRadius)
         maskImage.resizingMode = .stretch
         
-        let vibrancy = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: TouchMode.shared.panelWidth, height: 400))
-        vibrancy.material = .menu
-        vibrancy.state = .active
-        vibrancy.maskImage = maskImage
+        let effectView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: TouchMode.shared.panelWidth, height: 400))
+        effectView.material = .menu
+        effectView.state = .active
+        effectView.maskImage = maskImage
+        // Island style (command center is the main interface): the remote is black, drawn
+        // entirely by the view so it can drip out of the island – no system material behind it.
+        islandStyleRemote = UserDefaults.standard.object(forKey: "openInCommandCenter") as? Bool ?? true
+        let vibrancy: NSView = islandStyleRemote ? NSView(frame: effectView.frame) : effectView
         vibrancy.addSubview(hostingView)
 
         NSLayoutConstraint.activate([
@@ -599,7 +602,8 @@ final class AppController: NSObject, NSMenuDelegate {
         panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        panel.hasShadow = true
+        panel.hasShadow = !islandStyleRemote
+        if islandStyleRemote { panel.appearance = NSAppearance(named: .darkAqua) }
 
         // Command center is the main show: when opening into it, the small remote is
         // created invisibly (it still needs ordering once so its position is set) and
@@ -686,6 +690,7 @@ final class AppController: NSObject, NSMenuDelegate {
         if !panel.isOnActiveSpace || !panel.isVisible {
             log.error("bringPanelHere: panel was off this desktop (onActiveSpace=\(panel.isOnActiveSpace, privacy: .public) visible=\(panel.isVisible, privacy: .public))")
         }
+        RemoteReveal.shared.revealed = true
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         if !isPointOnScreen(panel.frame.origin, panelSize: panel.frame.size), let screen = NSScreen.main {
@@ -702,6 +707,7 @@ final class AppController: NSObject, NSMenuDelegate {
         releaseHeldKey(reason: "command mode")
         let screen = panel?.screen
         panel?.orderOut(nil)
+        islandWidget.remoteIsOpen = false
         islandWidget.hide()
         TouchMode.shared.commandModeActive = true
         commandMode.show(preferredScreen: screen)
@@ -724,6 +730,7 @@ final class AppController: NSObject, NSMenuDelegate {
             switch self.manager.connectionStatus {
             case .error, .localNetworkDenied:
                 // Errors are shown by the small remote.
+                RemoteReveal.shared.revealed = true
                 NSApp.activate(ignoringOtherApps: true)
                 panel.makeKeyAndOrderFront(nil)
             default:
@@ -755,7 +762,10 @@ final class AppController: NSObject, NSMenuDelegate {
             let height = fitted > 50 ? fitted : panel.frame.height
 
             let target: NSRect
-            if touch {
+            if self.islandStyleRemote {
+                self.isDocked = false
+                target = self.islandRemoteFrame(width: width, height: height)
+            } else if touch {
                 if !self.isDocked {
                     self.undockedTopLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
                     self.isDocked = true
@@ -776,7 +786,55 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Island style: centred under the island, hanging just below it.
+    private func islandRemoteFrame(width: CGFloat, height: CGFloat) -> NSRect {
+        guard let screen = commandMode.lastScreen ?? panel?.screen ?? NSScreen.main else {
+            return NSRect(x: 0, y: 0, width: width, height: height)
+        }
+        let island = CommandModeController.islandRect(on: screen)
+        let top = screen.frame.maxY - island.maxY - 6
+        let h = min(height, top - screen.visibleFrame.minY - 8)
+        return NSRect(x: screen.frame.minX + island.midX - width / 2, y: top - h, width: width, height: h)
+    }
+
+    /// Remote button on the island widget: first tap drips the remote out, second tap
+    /// draws it back into the island.
+    private func toggleIslandRemote() {
+        guard let panel else { return }
+        if panel.isVisible {
+            RemoteReveal.shared.revealed = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let panel = self?.panel, !RemoteReveal.shared.revealed else { return }
+                panel.orderOut(nil)
+                self?.islandWidget.remoteIsOpen = false
+            }
+        } else {
+            RemoteReveal.shared.revealed = false
+            panel.contentView?.layoutSubtreeIfNeeded()
+            let fitted = panelHostingView?.fittingSize.height ?? 0
+            let frame = islandRemoteFrame(width: TouchMode.shared.panelWidth, height: fitted > 50 ? fitted : panel.frame.height)
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            isRedocking = true
+            panel.setFrame(frame, display: true)
+            isRedocking = false
+            islandWidget.remoteIsOpen = true
+            islandWidget.collapse()
+            // Start the drip once the collapsed frame is on screen.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { RemoteReveal.shared.revealed = true }
+        }
+    }
+
     fileprivate func panelDidResize(_ panel: NSPanel) {
+        if islandStyleRemote, !isRedocking {
+            // Keep it hanging from the island as its height changes.
+            let target = islandRemoteFrame(width: panel.frame.width, height: panel.frame.height)
+            guard abs(target.maxY - panel.frame.maxY) > 0.5 || abs(target.midX - panel.frame.midX) > 0.5 else { return }
+            isRedocking = true
+            panel.setFrame(target, display: true)
+            isRedocking = false
+            return
+        }
         guard isDocked, !isRedocking, TouchMode.shared.isTouch else { return }
         let target = dockedFrame(width: panel.frame.width, height: panel.frame.height, panel: panel)
         guard abs(target.maxX - panel.frame.maxX) > 0.5 || abs(target.maxY - panel.frame.maxY) > 0.5 else { return }
@@ -806,6 +864,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func savePanelPosition() {
+        guard !islandStyleRemote else { return }   // it always hangs under the island
         guard var frame = panel?.frame else {
             log.debug("save: no panel frame")
             return
@@ -1270,6 +1329,7 @@ struct PanelCloseButton: View {
 
 struct PanelContentView: View {
     @Environment(AppleTVManager.self) private var manager
+    @AppStorage("openInCommandCenter") private var islandStyle = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1285,6 +1345,39 @@ struct PanelContentView: View {
             }
         }
         .frame(width: TouchMode.shared.panelWidth)
+        .modifier(IslandRemoteStyle(enabled: islandStyle, width: TouchMode.shared.panelWidth))
+    }
+}
+
+/// Whether the island-style remote is poured out (true) or drawn back into the island.
+@Observable
+final class RemoteReveal {
+    static let shared = RemoteReveal()
+    var revealed = true
+}
+
+/// Island style for the small remote: black, outline controls, red when "Red on black"
+/// is on, and revealed with the same drip as command center – from a point just above
+/// its top edge, which sits right under the island.
+private struct IslandRemoteStyle: ViewModifier {
+    let enabled: Bool
+    let width: CGFloat
+    @AppStorage("commandModeRed") private var redOnBlack = false
+
+    func body(content: Content) -> some View {
+        if enabled {
+            let source = CGRect(x: width / 2 - 30, y: -46, width: 60, height: 40)
+            content
+                .environment(\.oledControls, true)
+                .background(Color.black)
+                .colorMultiply(redOnBlack ? Color(red: 1, green: 0.12, blue: 0.08) : .white)
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .clipShape(IslandReveal(island: source, progress: RemoteReveal.shared.revealed ? 1 : 0))
+                .animation(.linear(duration: RemoteReveal.shared.revealed ? 1.4 : 0.7), value: RemoteReveal.shared.revealed)
+                .preferredColorScheme(.dark)
+        } else {
+            content
+        }
     }
 }
 
