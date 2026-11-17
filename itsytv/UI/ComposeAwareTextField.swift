@@ -8,8 +8,15 @@ import SwiftUI
 struct ComposeAwareTextField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String = ""
+    /// Point size of the text. The default suits the small remote; command center passes a larger one.
+    var fontSize: CGFloat = NSFont.smallSystemFontSize
+    /// Bring the app to the front when the field appears. Off for the island widget, whose
+    /// panel takes the keyboard without activating the app.
+    var activatesApp = true
     var onCommittedTextChange: (String) -> Void
     var onSubmit: () -> Void
+    /// Esc. Defaults to the same as submitting (close the box).
+    var onCancel: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSTextField {
         let field = NSTextField()
@@ -19,19 +26,21 @@ struct ComposeAwareTextField: NSViewRepresentable {
                 string: placeholder,
                 attributes: [
                     .foregroundColor: NSColor.tertiaryLabelColor,
-                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium),
+                    .font: NSFont.systemFont(ofSize: fontSize, weight: .medium),
                 ]
             )
         }
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        field.font = .systemFont(ofSize: fontSize, weight: .medium)
         field.cell?.lineBreakMode = .byTruncatingTail
         field.delegate = context.coordinator
         // Auto-focus on appear
+        let activatesApp = self.activatesApp
         DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
+            if activatesApp { NSApp.activate(ignoringOtherApps: true) }
+            field.window?.makeKey()
             field.window?.makeFirstResponder(field)
         }
         return field
@@ -78,6 +87,11 @@ struct ComposeAwareTextField: NSViewRepresentable {
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
                 parent.onSubmit()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                // Esc closes the box instead of beeping.
+                (parent.onCancel ?? parent.onSubmit)()
                 return true
             }
             return false

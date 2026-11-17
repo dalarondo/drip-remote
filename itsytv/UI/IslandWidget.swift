@@ -34,6 +34,8 @@ final class IslandWidgetController {
     var onRemote: (() -> Void)?
     /// The widget opened (true) or closed (false).
     var onExpandedChange: ((Bool) -> Void)?
+    /// The gear: open Settings.
+    var onSettings: (() -> Void)?
 
     var isVisible: Bool { panel != nil }
 
@@ -81,6 +83,10 @@ final class IslandWidgetController {
             islandSize: island.size,
             onDrip: { [weak self] in self?.onDrip?() },
             onRemote: { [weak self] in self?.onRemote?() },
+            onSettings: { [weak self] in
+                self?.state.expanded = false
+                self?.onSettings?()
+            },
             onExpandedChange: { [weak self] in self?.expandedChanged($0) }
         )
         .environment(manager)
@@ -135,7 +141,13 @@ struct IslandWidgetView: View {
     let islandSize: CGSize
     let onDrip: () -> Void
     let onRemote: () -> Void
+    let onSettings: () -> Void
     let onExpandedChange: (Bool) -> Void
+
+    /// Text typed here goes to the Apple TV's focused text field.
+    @State private var typedText = ""
+    /// The user closed the text box (Return / Esc); it comes back with the next text field.
+    @State private var typingDismissed = false
 
     /// Width of each "ear" either side of the camera in the compact pill.
     static let ear: CGFloat = 64
@@ -177,6 +189,10 @@ struct IslandWidgetView: View {
             onExpandedChange(isExpanded)
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.78), value: expanded)
+        .onChange(of: manager.keyboardFocused) { _, focused in
+            typingDismissed = false
+            typedText = focused ? manager.focusedFieldText : ""
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
     }
@@ -195,7 +211,8 @@ struct IslandWidgetView: View {
                 }
             Spacer().frame(width: islandSize.width)
             // A keyboard here means the Apple TV is waiting for text.
-            Image(systemName: manager.keyboardFocused ? "keyboard" : (isPlaying ? "waveform" : "pause.fill"))
+            Image(systemName: manager.connectionStatus != .connected ? "wifi.slash"
+                  : (manager.keyboardFocused ? "keyboard" : (isPlaying ? "waveform" : "pause.fill")))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.85))
                 .symbolEffect(.variableColor.iterative, isActive: isPlaying && !manager.keyboardFocused)
@@ -220,10 +237,22 @@ struct IslandWidgetView: View {
                     .foregroundStyle(.white.opacity(0.5))
                     .lineLimit(1)
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 44)
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
             .onTapGesture { state.expanded = false }   // tap the title to collapse
+            .overlay(alignment: .trailing) {
+                Button(action: onSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
+                .padding(.trailing, 14)
+            }
 
             HStack(spacing: 14) {
                 control("appletvremote.gen4.fill", size: 44,
@@ -238,13 +267,35 @@ struct IslandWidgetView: View {
                 control("drop.fill", size: 44, help: "Command center", action: onDrip)
             }
 
-            NowPlayingProgress(
-                nowPlaying: np,
-                duration: np?.duration ?? 0,
-                onSeek: { mrp.seekToPosition($0) }
-            )
-            .padding(.horizontal, 28)
-            .opacity((np?.duration ?? 0) > 0 ? 1 : 0.3)
+            if manager.keyboardFocused && !typingDismissed {
+                // The Apple TV is waiting for text: type it right here.
+                HStack(spacing: 8) {
+                    Image(systemName: "keyboard")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.5))
+                    ComposeAwareTextField(
+                        text: $typedText,
+                        placeholder: "Type on Apple TV…",
+                        fontSize: 14,
+                        activatesApp: false,
+                        onCommittedTextChange: { manager.updateRemoteText($0) },
+                        onSubmit: { typingDismissed = true }
+                    )
+                }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .background(Capsule().stroke(Color.white.opacity(0.28), lineWidth: 1.5))
+                .padding(.horizontal, 28)
+                .padding(.top, 14)
+            } else {
+                NowPlayingProgress(
+                    nowPlaying: np,
+                    duration: np?.duration ?? 0,
+                    onSeek: { mrp.seekToPosition($0) }
+                )
+                .padding(.horizontal, 28)
+                .opacity((np?.duration ?? 0) > 0 ? 1 : 0.3)
+            }
         }
     }
 

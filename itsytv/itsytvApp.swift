@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ItsytvCoreLog.verbose = true
         #endif
         Self.shared = self
+        KeyboardBacklight.shared.recoverAfterCrash()
         if DockIcon.isOn { DockIcon.apply() }
         appController = AppController(manager: manager, iconLoader: iconLoader)
         ItsyTVShortcuts.updateAppShortcutParameters()

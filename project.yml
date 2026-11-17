@@ -96,6 +96,7 @@ targets:
       - path: itsytvTests
       - path: itsytv/Onboarding
       - path: itsytv/Shortcuts
+      - path: itsytv/Island
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.itsytv.app.tests

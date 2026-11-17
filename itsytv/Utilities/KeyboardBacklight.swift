@@ -49,12 +49,32 @@ final class KeyboardBacklight {
             _ = set(client, setSelector, 0, id)
         }
         saved = levels
+        // Remember the levels on disk too: if the app is killed while dimmed, the next
+        // launch puts the backlight back (see `recoverAfterCrash`).
+        UserDefaults.standard.set(
+            Dictionary(uniqueKeysWithValues: levels.map { (String($0.key), Double($0.value)) }),
+            forKey: Self.savedKey
+        )
+    }
+
+    private static let savedKey = "keyboardBacklightBeforeDim"
+
+    /// Call at launch: if the last run ended while the backlight was dimmed, restore it.
+    func recoverAfterCrash() {
+        guard saved == nil, let client,
+              let stored = UserDefaults.standard.dictionary(forKey: Self.savedKey) as? [String: Double] else { return }
+        UserDefaults.standard.removeObject(forKey: Self.savedKey)
+        let set = unsafeBitCast(client.method(for: setSelector), to: Setter.self)
+        for (key, level) in stored {
+            if let id = UInt64(key) { _ = set(client, setSelector, Float(level), id) }
+        }
     }
 
     /// Put the backlight back to the level it had before `dim()`.
     func restore() {
         guard let client, let levels = saved else { return }
         saved = nil
+        UserDefaults.standard.removeObject(forKey: Self.savedKey)
         let set = unsafeBitCast(client.method(for: setSelector), to: Setter.self)
         for (id, level) in levels {
             _ = set(client, setSelector, level, id)

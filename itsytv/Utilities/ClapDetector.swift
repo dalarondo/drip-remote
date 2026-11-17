@@ -197,7 +197,7 @@ final class ClapDetector: NSObject, SNResultsObserving {
             pendingOnset = onset
             if level < max(onset.level * 0.5, ambient * 2) {
                 pendingOnset = nil
-                log.notice("sharp sound: peak \(onset.level, format: .fixed(precision: 3)) room \(self.ambient, format: .fixed(precision: 3))")
+                log.debug("sharp sound: peak \(onset.level, format: .fixed(precision: 3)) room \(self.ambient, format: .fixed(precision: 3))")
                 sharpOnset(at: onset.time, now: now)
             } else if now - onset.time > decayWithin {
                 pendingOnset = nil
@@ -210,12 +210,12 @@ final class ClapDetector: NSObject, SNResultsObserving {
         // Periodic health line, so a stall can be diagnosed from the log.
         if now - lastHealthLog > 15 {
             lastHealthLog = now
-            log.notice("listening: ambient \(self.ambient, format: .fixed(precision: 4)) threshold \(threshold, format: .fixed(precision: 3)) last clap label \(now - self.lastClassifierHit, format: .fixed(precision: 1))s ago")
+            log.debug("listening: ambient \(self.ambient, format: .fixed(precision: 4)) threshold \(threshold, format: .fixed(precision: 3)) last clap label \(now - self.lastClassifierHit, format: .fixed(precision: 1))s ago")
         }
 
         if let deadline = candidateDeadline, now > deadline {
             candidateDeadline = nil
-            log.notice("double onset not confirmed as a clap")
+            log.debug("double onset not confirmed as a clap")
         }
     }
 

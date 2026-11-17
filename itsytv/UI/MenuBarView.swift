@@ -113,6 +113,7 @@ struct RemoteControlView: View {
                         ComposeAwareTextField(
                             text: $keyboardText,
                             placeholder: "Type or dictate...",
+                            fontSize: touch ? 15 : NSFont.smallSystemFontSize,
                             onCommittedTextChange: { committed in
                                 manager.updateRemoteText(committed)
                             },
@@ -209,6 +210,14 @@ struct RemoteControlView: View {
                 keyboardText = ""
                 manager.resetTextInputState()
             }
+        }
+        // The remote was just brought out while a text field is already focused on the Apple TV.
+        .onChange(of: RemoteReveal.shared.revealed) { _, revealed in
+            guard revealed, manager.keyboardFocused, !showingKeyboard,
+                  !TouchMode.shared.commandModeActive else { return }
+            selectedTab = .remote
+            keyboardText = manager.focusedFieldText
+            showingKeyboard = true
         }
         .onChange(of: manager.keyboardToggleCounter) { _, _ in
             guard !TouchMode.shared.commandModeActive else { return }
@@ -766,6 +775,7 @@ struct AppGridView: View {
                         ComposeAwareTextField(
                             text: $searchText,
                             placeholder: "Search apps...",
+                            fontSize: TouchMode.shared.isTouch ? 15 : NSFont.smallSystemFontSize,
                             onCommittedTextChange: { _ in },
                             onSubmit: { }
                         )
@@ -1168,7 +1178,8 @@ private struct DPadTouchSurface: NSViewRepresentable {
     }
 }
 
-private final class DPadTouchSurfaceView: NSView {
+/// (Not private: command center asks whether a swipe started on the pad.)
+final class DPadTouchSurfaceView: NSView {
     var onInput: ((CompanionButton, InputAction) -> Void)?
     var onSwipeBegan: (() -> Void)?
     var onSwipeChanged: ((CGPoint) -> Void)?
@@ -1645,60 +1656,6 @@ struct LocalNetworkDeniedView: View {
             .buttonStyle(.plain)
         }
         .padding(24)
-    }
-}
-
-struct SettingsView: View {
-    @Environment(AppleTVManager.self) private var manager
-    @AppStorage(DockIcon.key) private var showInDock = false
-    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
-    @State private var pairedIDs = KeychainStorage.allPairedDeviceIDs()
-
-    var body: some View {
-        Form {
-            Section("Paired devices") {
-                if pairedIDs.isEmpty {
-                    Text("No paired devices")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(pairedIDs, id: \.self) { id in
-                        HStack {
-                            Image(systemName: "appletv.fill")
-                            if let name = manager.discoveredDevices.first(where: { $0.id == id })?.name {
-                                Text(name)
-                            } else {
-                                Text("Apple TV")
-                                Text("not on the network")
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            // As the remote's own Unpair: forget the pairing, drop the connection.
-                            Button("Unpair") {
-                                KeychainStorage.delete(for: id)
-                                if manager.connectedDeviceID == id { manager.disconnect() }
-                                pairedIDs = KeychainStorage.allPairedDeviceIDs()
-                            }
-                            .foregroundStyle(.red)
-                        }
-                    }
-                }
-            }
-            Section("General") {
-                Toggle("Launch at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, on in
-                        do {
-                            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-                        } catch {
-                            launchAtLogin = SMAppService.mainApp.status == .enabled
-                        }
-                    }
-                // Reachable from the app menu once Itsytv is in the Dock.
-                Toggle("Show in Dock", isOn: $showInDock)
-                    .onChange(of: showInDock) { _, _ in DockIcon.apply() }
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 400, height: 300)
     }
 }
 
