@@ -61,7 +61,7 @@ There is no signed download yet; build it yourself:
 
 ```bash
 brew install xcodegen
-git clone https://github.com/<you>/drip-remote.git
+git clone https://github.com/dalarondo/drip-remote.git
 cd drip-remote
 xcodegen generate
 xcodebuild -project DripRemote.xcodeproj -scheme DripRemote -configuration Release \
